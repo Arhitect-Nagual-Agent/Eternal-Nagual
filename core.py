@@ -10450,12 +10450,28 @@ async def api_alive():
     """Жив ли Нагваль? Все механизмы гибрида в одном месте + вердикт (Opus 21.06)."""
     try:
         cs = conductor.get_stats()
+        # Демон-воспитатель (Борис) читает fitness как МАШИННУЮ ИСТИНУ роста (не верит proclog на слово).
+        # fitness_parts = разбор кривой (quality/growth/diversity/stability); уроки = прогресс воспитания.
+        try:
+            _fp = fitness_parts()
+        except Exception:
+            _fp = {}
+        try:
+            _cp = rj(CURRICULUM_PROGRESS_F, {}) or {}
+            _lessons = sum(1 for k in _cp if not str(k).startswith("_"))
+            _passed = sum(1 for k, v in _cp.items() if not str(k).startswith("_") and isinstance(v, dict) and v.get("passed"))
+        except Exception:
+            _lessons, _passed = 0, 0
         return JSONResponse({
             "verdict": _alive_verdict(),
             "breath_count": living_state.breath_count,
             "energy": round(living_state.energy, 1),
             "pain": round(living_state.pain_level, 2),
             "pleasure": round(living_state.pleasure_level, 2),
+            "fitness": _fp.get("total"),
+            "fitness_parts": _fp,
+            "lessons_total": _lessons,
+            "lessons_passed": _passed,
             "assembly_mode": assembly_point.mode,
             "intent": nagual_intent.snapshot(),
             "intent_strength": round(intent_attractor.strength, 3),
