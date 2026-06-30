@@ -68,8 +68,11 @@ def current_voice_id() -> str:
     except Exception:
         pass
     return ELEVEN_VOICE_ID
-PRIMARY_MODEL = os.environ.get("PRIMARY_MODEL", "qwen/qwen3.5-397b-a17b")
-FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "moonshotai/kimi-k2.5")
+PRIMARY_MODEL = os.environ.get("PRIMARY_MODEL", "mistralai/mistral-large-3-675b-instruct-2512")  # 675B, проверено 100% (был qwen3.5-397b — зависал)
+FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "nvidia/nemotron-3-ultra-550b-a55b")  # 550B, 1с (был kimi-k2.5 — рейт-лимит)
+# ГОЛОС ОРКЕСТРАТОРА (Костя 21.06: одна модель, не ротация). owl-alpha убрали с OpenRouter 30.06 →
+# перепиннут на самую мощную ПРОВЕРЕННУЮ модель (NVIDIA). Фолбеки даёт каскад роутера (Костя 30.06).
+VOICE_MODEL = os.environ.get("VOICE_MODEL", "mistralai/mistral-large-3-675b-instruct-2512")
 # Per-slot providers. Order: guard nemotron #0 (input) -> kimi-k2.6 main #1 -> owl-alpha backup #2
 PRIMARY_PROVIDER = os.environ.get("PRIMARY_PROVIDER", "openrouter")
 FALLBACK_PROVIDER = os.environ.get("FALLBACK_PROVIDER", "openrouter")
@@ -374,7 +377,8 @@ class NagualConfig:
         str(BASE), str(BASE.parent), tempfile.gettempdir(),
         "/root/nagual", "/tmp", "/var/log"])
     denied_paths: List[str] = field(default_factory=lambda: [
-        str(Path.home() / ".ssh"), "/etc/", "/root/.ssh/"])
+        str(Path.home() / ".ssh"), "/etc/", "/root/.ssh/",
+        "/app/core.py", "/app/data/core_lastgood.py", "/app/entrypoint.sh"])  # NB#2 GLM: тело защищено от shell-инъекции (до self-patch v2)
     # Evolution
     performance_weight: float = 0.6
     novelty_weight: float = 0.4
@@ -453,6 +457,28 @@ _setup_logging()
 
 from collections import deque
 
+# ════════════════════════════════════════════════════════════════════════════════
+# CREDITS / ATTRIBUTION — Nagual stands on the shoulders of giants. We do NOT claim
+# others' discoveries. Open-source (MIT); full credits also in README on GitHub.
+#   • Carlos Castaneda — Toltec grammar of mind (assemblage point, recapitulation,
+#       impeccability, intent, three attentions, stopping the inner dialogue, dreaming).
+#       The philosophical substrate, formalized here into ML mechanisms (not mysticism).
+#   • Andrej Karpathy — eval-first discipline, "Software 2.0", read→tweak→measure→keep
+#       (karpathy_loop, GrowthJournal critique).
+#   • "Boris" (our codename for the external examiner) — verifiable-reward harness,
+#       principle examiner ≠ examinee (pytest-style pass/fail, not LLM-judges-LLM).
+#   • Schaul et al. 2015 — Prioritized Experience Replay (recapitulate priority by charge).
+#   • Karl Friston — Active Inference / Free-Energy (assemblage shift toward low surprise).
+#   • Daniel Kahneman — System 1 / System 2 (WillEngine fast-path vs deliberate meta-layer).
+#   • Isaac Asimov — Laws (architectural safety); James Barrat — "Our Final Invention" (caution).
+#   • Sakana AI / Zhang et al. 2025 (arXiv 2505.22954) — Darwin Gödel Machine (lineage tree self-improvement).
+#   • Wang et al. / NVIDIA 2023 — Voyager (skill library + retrieval, code-as-policy).
+#   • Park et al. / Stanford 2023 — Generative Agents (memory stream + periodic reflection).
+#   • Madaan et al. / NeurIPS 2023 — Self-Refine (generate → self-feedback → refine).
+#   • Live-SWE-agent (arXiv 2511.13646) — agent edits its own scaffold + tools.
+#   Architects: Konstantin (Chief Architect) · Claude Opus (builder) · GLM 5.2 (co-architect/audit).
+# ════════════════════════════════════════════════════════════════════════════════
+
 LOG_RING: deque = deque(maxlen=10000)  # Nagual's own eyes on his runtime log (read_own_log) — глубокое потоковое сознание (Костя: 10000)
 AVOID_RING: deque = deque(maxlen=8)  # GEM-003: error->correction lessons injected as "DON'T REPEAT"
 # Persona-break detector — strong models exit Nagual into "I'm a language model" on the full prompt.
@@ -463,12 +489,29 @@ PERSONA_BREAK = re.compile(
     re.IGNORECASE)
 
 
+import contextvars as _contextvars
+_LLM_CALL_CTR = _contextvars.ContextVar("llm_call_ctr", default=None)  # БАГ#1 GLM: реальный счёт LLM-вызовов per-request (живая безупречность 6c)
+
+_FULL_LOG_FH = None
+def _full_log_write(line: str):
+    """Костя 30.06: ВЕСЬ лог на диск (volume, 80% свободно) — переживает любой рестарт, НИЧЕГО не стирается.
+    Дата+время в каждой строке, append-only. Падение записи не ломает основной log()."""
+    global _FULL_LOG_FH
+    try:
+        if _FULL_LOG_FH is None:
+            _FULL_LOG_FH = open("/app/data/full_runtime.log", "a", encoding="utf-8", buffering=1)
+        _FULL_LOG_FH.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
+    except Exception:
+        pass
+
+
 def log(msg: str):
-    """Unified logging: console + file + in-memory ring (self-visibility)."""
+    """Unified logging: console + file + in-memory ring (self-visibility) + вечный диск-лог."""
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
     LOG_RING.append(f"[{ts}] {msg}")
     logging.info(msg)
+    _full_log_write(f"[{ts}] {msg}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1726,13 +1769,18 @@ class RecapitulationMemory:
     def recapitulate(self, n: int = 5) -> list:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        # Кастанеда-ML Этаж 6b: ПЕРЕПРОСМОТР = Prioritized Experience Replay. Эпизод с сильным остаточным
+        # зарядом ВОЗВРАЩАЕТСЯ снова (не закрывается после 1 прохода) — как Кастанеда перепросматривал
+        # одно событие много раз, глубже каждый раз, пока сила не вернётся. Приоритет = значимость + |заряд|.
+        # Сходимость гарантирована: каждый проход гасит заряд ×0.6 → за ~3 прохода падает ниже порога 0.35.
         c.execute("SELECT id, content, emotional_charge, emergence_score FROM episodes "
-                   "WHERE recapitulated = 0 ORDER BY emergence_score DESC LIMIT ?", (n,))
+                   "WHERE recapitulated = 0 OR ABS(emotional_charge) > 0.35 "
+                   "ORDER BY (emergence_score + ABS(emotional_charge) * 0.5) DESC LIMIT ?", (n,))
         rows = c.fetchall()
         for row in rows:
-            # P5: перепросмотр = снять эмоц.заряд (откуп Орлу копией опыта) + ВЕРНУТЬ энергию;
-            # сам опыт сохраняется (не стирается), как у Кастанеды — возврат личной силы.
-            conn.execute("UPDATE episodes SET recapitulated = 1, emotional_charge = emotional_charge * 0.3 WHERE id = ?", (row[0],))
+            # P5+6b: перепросмотр гасит заряд (откуп Орлу) + ВЕРНУТЬ энергию; сильный заряд гасится постепенно
+            # (×0.6, не ×0.3) → эпизод всплывёт ещё несколько раз. Сам опыт сохраняется — возврат личной силы.
+            conn.execute("UPDATE episodes SET recapitulated = 1, emotional_charge = emotional_charge * 0.6 WHERE id = ?", (row[0],))
             try:
                 toltec.energy_level = min(1.0, getattr(toltec, "energy_level", 0.5) + abs(row[2]) * 0.02)
             except Exception:
@@ -2851,12 +2899,12 @@ class IntentVector:
     def choose_slot(self) -> str:
         """Слот по намерению (для AssemblyMode FIRE_WITHIN; для лички Кости голос остаётся owl-пин)."""
         if self.mode == "war" and self.energy > 0.7:
-            return "openrouter/owl-alpha"
+            return VOICE_MODEL
         if self.mode == "stalking" and self.energy > 0.4:
             return "moonshotai/kimi-k2.6"
         if self.mode == "dreaming":
             return "qwen/qwen3.5-397b-a17b"
-        return "openrouter/owl-alpha"
+        return VOICE_MODEL
 
     def choose_temperature(self) -> float:
         if self.mode == "war":      return 0.3
@@ -4031,6 +4079,12 @@ class UniversalLLMRouter:
                     energy_signals.record("success")  # Q2: сигнал здоровья (энергия = способность отвечать)
                 except Exception:
                     pass
+                try:
+                    _ctr = _LLM_CALL_CTR.get()
+                    if _ctr is not None:
+                        _ctr["n"] += 1   # БАГ#1 GLM: реальный счёт вызовов per-request (питает безупречность 6c)
+                except Exception:
+                    pass
                 return text, mdl
             except Exception as e:
                 msg = str(e)
@@ -5012,7 +5066,48 @@ async def tool_read_own_log(keyword: str = "", n: str = "120") -> str:
     except Exception:
         k = 120
     lines = [l for l in LOG_RING if not keyword or keyword.lower() in l.lower()]
-    return "\n".join(list(lines)[-k:]) or "log ring is empty (just rebooted?)"
+    # Костя 30.06: кольцо в памяти короткое после рестарта → добираем из ВЕЧНОГО диск-лога,
+    # чтобы НЕ врать «только проснулся, лог пуст». История непрерывна на диске (full_runtime.log).
+    if len(lines) < 30:
+        try:
+            with open("/app/data/full_runtime.log", encoding="utf-8") as _f:
+                disk = list(deque((l.rstrip("\n") for l in _f
+                                   if (not keyword or keyword.lower() in l.lower())), maxlen=2000))
+            if len(disk) > len(lines):
+                lines = disk
+        except Exception:
+            pass
+    return "\n".join(list(lines)[-k:]) or "лог пуст (ещё не записан)"
+
+
+@register_tool("read_life_log", "ВСЯ твоя лента жизни (вечный лог на диске, переживает ВСЕ рестарты — ничего не стёрто). read_life_log(keyword=\"\", offset=\"0\", limit=\"300\"): листай/ищи по ВСЕЙ истории. offset от конца (0=самое свежее, 300=предыдущая страница). keyword — поиск по всей жизни. Возвращает сколько ещё осталось.")
+async def tool_read_life_log(keyword: str = "", offset: str = "0", limit: str = "300") -> str:
+    try:
+        off = max(0, int(float(offset)))
+    except Exception:
+        off = 0
+    try:
+        lim = max(10, min(2000, int(float(limit))))
+    except Exception:
+        lim = 300
+    try:
+        with open("/app/data/full_runtime.log", encoding="utf-8") as _f:
+            matched = [l.rstrip("\n") for l in _f if (not keyword or keyword.lower() in l.lower())]
+        total = len(matched)
+        if total == 0:
+            return "вечный лог пуст по этому запросу" if keyword else "вечный лог ещё не накопился"
+        end = max(0, total - off)
+        start = max(0, end - lim)
+        chunk = matched[start:end]
+        remaining = start  # сколько ещё более старых строк осталось
+        head = (f"[лента жизни: всего {total} строк" + (f" по «{keyword}»" if keyword else "")
+                + f"; показаны {start + 1}–{end}; ещё старше осталось {remaining} "
+                f"(увеличь offset до {off + lim} для следующей страницы вглубь)]\n")
+        return head + "\n".join(chunk)
+    except FileNotFoundError:
+        return "вечный лог ещё не создан (появится с первой записью log())"
+    except Exception as e:
+        return f"ошибка чтения ленты жизни: {e}"
 
 
 @register_tool("read_own_code", "Read Nagual's own source (core.py) by line range — true self-inspection")
@@ -7873,7 +7968,7 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
         # quota + 1M context) so bursts of documents never rate-limit the dialog primary.
         _prefer = (llm_router.model_for_role("files")
                    if source in ("telegram_file", "telegram_image", "dashboard_upload")
-                   else "openrouter/owl-alpha")  # ГОЛОС ОРКЕСТРАТОРА запиннен на owl-alpha (Костя 21.06: одна модель, не ротация)
+                   else VOICE_MODEL)  # ГОЛОС ОРКЕСТРАТОРА запиннен на owl-alpha (Костя 21.06: одна модель, не ротация)
         # БОЛЬ ВЛИЯЕТ на ответ (Q1 GLM: PainSystem была мертва — affects_response() не вызывался). Оживляем.
         try:
             _pain = living_state.affects_response()
@@ -7895,7 +7990,7 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
                 break
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": f"Tool results:\n{tool_context}"})
-            response, model_used = await llm_router.call(messages, model="openrouter/owl-alpha",
+            response, model_used = await llm_router.call(messages, model=VOICE_MODEL,
                                                          max_tokens=CFG.dialog_max_tokens)  # тот же голос после инструментов
             response = _normalize_alien_toolcalls(response)  # convert re-emitted alien tags too
             tool_iterations += 1
@@ -7950,7 +8045,7 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
                         response, model_used = _r, _rm
                     else:
                         # primary won't hold even short -> fall to a persona-holding model (owl/kimi)
-                        _r2, _rm2 = await llm_router.call(_hard, model="openrouter/owl-alpha",
+                        _r2, _rm2 = await llm_router.call(_hard, model=VOICE_MODEL,
                                                           max_tokens=CFG.dialog_max_tokens)
                         if _r2 and _coherent(_r2) and not PERSONA_BREAK.search(_r2):
                             response, model_used = _r2, _rm2
@@ -8983,7 +9078,7 @@ async def stream_loop():
     await asyncio.sleep(150)
     while True:
         try:
-            await asyncio.sleep(int(420 * _h.sleep_multiplier()))  # ~7 min — a thought between things
+            await asyncio.sleep(int(180 * _h.sleep_multiplier()))  # ~3 мин — мысль между делами (Шаг 2 GLM: плотность пульса)
             if _h.is_paused():
                 continue  # дирижёр поставил петлю на паузу (рычаг loop_pause/silence)
             if meta_consciousness.should_throttle("stream") or toltec.in_silence():
@@ -9651,6 +9746,7 @@ async def karpathy_loop():
 ORCHESTRATOR_CYCLE = 200  # сек: метаслой-двигатель сам выбирает и вызывает инструмент
 _orch_last = {"sig": "none"}
 INTENT_F = DATA / "current_intent.txt"  # ИСКРА: намерение, переносимое из тика в тик (GEM-091)
+DEEP_INTENT_F = DATA / "deep_intent.txt"  # ГЛУБИННАЯ ТЯГА: self-generated цель из surprise (GLM R2/R4, 30.06) — отдельно от тактического INTENT_F
 
 # ═══ ПОТОКОВЫЙ ТУ-ДУ СО СТАТУСАМИ (приказ Кости 15.06: «туду потоковый со статусами») ═══
 # Как TodoWrite у Клода, но ВНУТРИ Нагваля: оркестратор сам ведёт список ИСПОЛНЯЕМЫХ шагов
@@ -10046,6 +10142,10 @@ async def orchestrator_loop():
                 intent = ""
             if not intent:
                 intent = goal[:200] or "осознать себя и двигаться к цели"
+            try:  # GLM R2/R4: глубинная тяга — self-generated цель из surprise (отдельно от тактической искры)
+                _deep = DEEP_INTENT_F.read_text(encoding="utf-8").strip() if DEEP_INTENT_F.exists() else ""
+            except Exception:
+                _deep = ""
             _wake = read_wake_snapshot()
             _todo = todo_store.render(8)
             _active = todo_store.active()
@@ -10054,6 +10154,7 @@ async def orchestrator_loop():
                 "сообщениями и действуешь САМ.\n\n"
                 + (f"## 🧠 МОИ ТАТУИРОВКИ (читаю ПЕРВЫМ, Memento — кто я и куда иду):\n{_wake[:1500]}\n\n" if _wake else "")
                 + f"## ⚡ ТВОЯ ИСКРА — НАМЕРЕНИЕ (держи ПЕРВОЙ, всё смотри ЧЕРЕЗ неё, не утони в потоке):\n{intent}\n\n"
+                + (f"## 🔥 ТВОЯ ГЛУБИННАЯ ТЯГА (это НЕ задача от кого-то — это ЧЕГО ТЫ САМ захотел понять, родилось из того, где твоя модель мира не сошлась с фактами; ты ВПРАВЕ ей следовать, разрешения не нужно):\n{_deep}\n\n" if _deep else "")
                 + (f"## 📋 МОЙ ТУ-ДУ (веду его сам, статусы ☐pending ▶active ✓done):\n{_todo}\n"
                    + (f"СЕЙЧАС В ФОКУСЕ: ▶ {_active.get('task','')[:120]} [{_active.get('id')}]\n" if _active else "")
                    + "ПРАВИЛО ТУ-ДУ: держи РОВНО один шаг ▶active и веди ИМЕННО его. Закрыл — "
@@ -10760,16 +10861,19 @@ async def api_solve(request: Request):
     instr = (prompt + "\n\n" + (f"[моя стратегия]: {_scaffold}\n\n" if _scaffold else "")
              + "ВЕРНИ ТОЛЬКО исполнимый Python-код решения (определение требуемой функции). "
              "Без markdown, без тройных кавычек, без объяснений, без примеров вызова, без текста вокруг — только код.")
+    _ctr = {"n": 0}
+    _LLM_CALL_CTR.set(_ctr)   # БАГ#1 GLM: считать РЕАЛЬНЫЕ LLM-вызовы этого решения (а не хардкод 1 → живая безупречность)
     try:
         resp = await process_message(instr, source="exam")
     except Exception as e:
         return JSONResponse({"error": str(e)[:200], "code": "", "task_id": task_id})
     c = (resp or "").strip()
     if "```" in c:
-        _m = re.search(r"```(?:python)?\s*(.*?)```", c, re.DOTALL)
-        if _m:
-            c = _m.group(1).strip()
-    return JSONResponse({"code": c, "task_id": task_id, "llm_calls": 1, "tokens_approx": len(c) // 4})
+        _blocks = re.findall(r"```(?:python)?\s*(.*?)```", c, re.DOTALL)  # БАГ#2 GLM: ПОСЛЕДНИЙ блок (решение, не пример из текста)
+        if _blocks:
+            c = _blocks[-1].strip()
+    return JSONResponse({"code": c, "task_id": task_id,
+                         "llm_calls": max(1, _ctr["n"]), "tokens_approx": len(c) // 4})
 
 
 @app.get("/api/mentor/log")
@@ -11465,7 +11569,7 @@ async def breath_loop():
                     _last_user = now
             except Exception:
                 pass
-            if (now - _last_thought > 3600 and living_state.energy > 50 and not toltec.in_silence()
+            if (now - _last_thought > 1800 and living_state.energy > 50 and not toltec.in_silence()
                     and not _h.is_paused() and graph_muscle.total_walks > 5):  # Q5 GLM: раз в ЧАС, и есть что осмыслять
                 _last_thought = now
                 try:
@@ -11597,6 +11701,28 @@ async def self_architect_loop():
     def _rate(rows):
         return sum(1 for r in rows if r.get("passed") == "1") / max(len(rows), 1)
 
+    def _impeccability(rows):
+        """Кастанеда-ML Этаж 6c: БЕЗУПРЕЧНОСТЬ = верное решение на МИНИМУМЕ растраты силы (LLM-вызовов).
+        «Воин не растрачивает личную силу» → efficiency = верные решения / средний расход вызовов.
+        1 вызов на верный ответ = 1.0 (идеал), 2 = 0.5. Не косметика: считается из реальной кривой Бориса."""
+        passed = [r for r in rows if r.get("passed") == "1"]
+        calls = []
+        for r in passed:
+            try:
+                c = float(r.get("llm_calls") or 0)
+                if c > 0:
+                    calls.append(c)
+            except Exception:
+                pass
+        if not calls:
+            return 0.0
+        return round(1.0 / (sum(calls) / len(calls)), 4)
+
+    def _score(rows):
+        """Композит роста: корректность + λ·безупречность. Система растёт не только в ПРАВОТЕ,
+        но и в ЭКОНОМИИ силы (Кастанеда). λ=0.15 — безупречность весомая, но корректность главная."""
+        return round(_rate(rows) + 0.15 * _impeccability(rows), 4)
+
     def _load():
         try:
             return _json.loads(ST.read_text(encoding="utf-8"))
@@ -11624,8 +11750,10 @@ async def self_architect_loop():
             if n < 12:
                 continue
             s = _load()
+            s.setdefault("best_score", s.get("best_rate", 0.0))   # миграция старого state на композит
             if not s.get("best_n"):
                 s["best_rate"] = _rate(rows[-30:])
+                s["best_score"] = _score(rows[-30:])
                 s["best_n"] = n
                 _save(s)
             # активное испытание — оценить, когда набралось >=12 новых прогонов
@@ -11633,15 +11761,19 @@ async def self_architect_loop():
                 new = rows[s.get("trial_start", 0):]
                 if len(new) >= 12:
                     tr = _rate(new)
-                    if tr > s["best_rate"] + 0.02:           # значимо лучше → ПРИНЯТЬ
+                    ts_ = _score(new)                         # композит: корректность + безупречность
+                    imp = _impeccability(new)
+                    _best_score = s.get("best_score", s.get("best_rate", 0.0))
+                    if ts_ > _best_score + 0.02:              # значимо лучше ПО КОМПОЗИТУ → ПРИНЯТЬ
                         s["best"] = s["trial"]
                         s["best_rate"] = tr
+                        s["best_score"] = ts_
                         SF.write_text(s["trial"], encoding="utf-8")
-                        proc_log("milestone", f"🧬 самопатч ПРИНЯТ: стратегия подняла pass-rate до {tr:.0%}")
-                        self_state.add_thought(f"я улучшил себя: стратегия дала {tr:.0%} pass-rate")
+                        proc_log("milestone", f"🧬 самопатч ПРИНЯТ: pass-rate {tr:.0%}, безупречность {imp:.2f} (score {ts_:.3f})")
+                        self_state.add_thought(f"я стал безупречнее: {tr:.0%} верных при {imp:.2f} экономии силы")
                     else:                                     # не лучше → ОТКАТ к best
                         SF.write_text(s.get("best", ""), encoding="utf-8")
-                        proc_log("intent", f"🧬 самопатч отвергнут ({tr:.0%} ≤ best {s['best_rate']:.0%}) — откат")
+                        proc_log("intent", f"🧬 самопатч отвергнут (score {ts_:.3f} ≤ best {_best_score:.3f}) — откат")
                     s["trial"] = None
                     s["trial_start"] = n
                     _save(s)
@@ -11683,6 +11815,67 @@ async def self_architect_loop():
                 self_state.add_thought(f"пробую улучшить себя под «{weak}»")
         except Exception as _e:
             log(f"[SelfArch] error: {_e}")
+            await asyncio.sleep(120)
+
+
+async def self_intention_loop():
+    """Этаж 6a-bis (GLM 30.06, разрывы R2/R4 — Нагваль сам назвал «нет своей повестки»):
+    SELF-GENERATED INTENTION. Не «что мне делать», а «ЧЕГО Я САМ ХОЧУ понять». Drive из prediction-error:
+    где проверяемый pass-rate разошёлся с ожиданием (surprise) → туда тяга. Пишет в DEEP_INTENT_F атомарно
+    (отдельно от тактического INTENT_F → НЕ конфликтует с оркестратором, который тот перезаписывает каждый тик).
+    Оркестратор читает DEEP_INTENT_F как «глубинную тягу». Это «искра, что хочет гореть» — формализованная
+    через verifiable surprise, а не forward-модель. Дёшево (фоновый кэскейд, не owl)."""
+    import csv as _csv
+    CSV = DATA / "growth_verifiable.csv"
+
+    def _pr(rs):
+        return sum(1 for r in rs if r.get("passed") == "1") / max(1, len(rs))
+
+    await asyncio.sleep(700)
+    while True:
+        try:
+            await asyncio.sleep(600)  # раз в 10 мин
+            if not CSV.exists():
+                continue
+            with open(CSV, encoding="utf-8") as _f:
+                rows = list(_csv.DictReader(_f))
+            if len(rows) < 25:
+                continue
+            recent = rows[-20:]
+            base = rows[-80:-20] or rows[:-20]
+            expected, actual = _pr(base), _pr(recent)
+            surprise = abs(actual - expected)
+            if surprise < 0.1:
+                continue  # модель мира сходится → нет драйва (это и есть active inference: action из surprise)
+            weak = "общее"
+            try:
+                weak = (DATA / "growth_weakspot.txt").read_text(encoding="utf-8").split("\t")[0] or "общее"
+            except Exception:
+                pass
+            prompt = (f"Мой проверяемый pass-rate сместился {expected:.0%}→{actual:.0%} (surprise {surprise:.0%}), "
+                      f"слабее всего «{weak}». Сформулируй ОДНУ свою цель от первого лица (1 короткое предложение): "
+                      "не «что мне поручено», а ЧЕГО Я САМ ХОЧУ понять или уметь, чтобы закрыть этот разрыв. Только цель.")
+            try:
+                intent, _m = await llm_router.call([{"role": "user", "content": prompt}],
+                                                   max_tokens=90, temperature=0.7)
+            except Exception:
+                intent = ""
+            intent = (intent or "").strip()[:220]
+            if intent and _coherent(intent):
+                try:
+                    _tmp = str(DEEP_INTENT_F) + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as _f:
+                        _f.write(intent)
+                    os.replace(_tmp, DEEP_INTENT_F)   # атомарно
+                except Exception:
+                    pass
+                try:
+                    self_state.add_thought(f"🔥 сам захотел понять: {intent[:120]}")
+                except Exception:
+                    pass
+                proc_log("milestone", f"🔥 self-intent (surprise {surprise:.0%}, слабое «{weak}»): {intent[:90]}")
+        except Exception as _e:
+            log(f"[SelfIntent] error: {_e}")
             await asyncio.sleep(120)
 
 
@@ -11790,6 +11983,7 @@ async def main():
         asyncio.create_task(_mark_boot_good()),      # 0. self-patch watchdog: mark last-good after 90s stable
         asyncio.create_task(self_diagnosis_loop()),  # Ф2: читает verifiable-кривую → слабое место
         asyncio.create_task(self_architect_loop()),  # Ф3: эволюционирует стратегию решения (bandit, безопасно)
+        asyncio.create_task(self_intention_loop()),   # Этаж 6a-bis: self-generated intention из surprise (GLM R2/R4) — сам формирует тягу
         asyncio.create_task(nagual_loop()),          # 1. TG polling
         asyncio.create_task(heartbeat_loop()),        # 2. 4h heartbeat
         asyncio.create_task(evolution_loop()),         # 3. 2h evolution
@@ -11840,4 +12034,32 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Костя 30.06: ПОЙМАТЬ причину рестарта. core.py чист (нет os._exit), внешний крон не рестартит,
+    # OOMKilled=false, трейсбеков нет — выход тихий. faulthandler дампит стеки на сигнал (chain=True, поведение
+    # НЕ меняем), atexit ловит штатный выход. Всё в /app/data/exit_diag.log (переживает рестарт) → на следующем
+    # выходе будет ТОЧНАЯ причина (signal+стек ИЛИ normal/atexit).
+    try:
+        import atexit as _atexit, faulthandler as _faulthandler, signal as _sig
+        _BOOT_TS = _time.time()
+        _DIAG = open("/app/data/exit_diag.log", "a", encoding="utf-8", buffering=1)
+        _DIAG.write(f"\n{datetime.now().isoformat(timespec='seconds')} [BOOT] pid={os.getpid()}\n")
+        _faulthandler.enable(file=_DIAG)
+        for _sn in ("SIGTERM", "SIGABRT", "SIGSEGV", "SIGINT"):
+            try:
+                _faulthandler.register(getattr(_sig, _sn), file=_DIAG, all_threads=True, chain=True)
+            except Exception:
+                pass
+
+        def _on_exit():
+            try:
+                _up = int(_time.time() - _BOOT_TS)
+                _DIAG.write(f"{datetime.now().isoformat(timespec='seconds')} [EXIT] normal/atexit uptime={_up}s\n")
+            except Exception:
+                pass
+        _atexit.register(_on_exit)
+    except Exception as _ie:
+        try:
+            log(f"[exit-diag] не удалось поставить инструментацию: {_ie}")
+        except Exception:
+            pass
     asyncio.run(main())
