@@ -2612,6 +2612,18 @@ class ToltecAlgorithms:
         "intent": "Aligning actions with deep purpose",
         "seeing": "Perceiving energy patterns beyond surface",
     }
+    # Кастанеда = РАБОЧИЕ алгоритмы, НЕ декорация (закон Кости): у каждой практики ЦЕНА личной силы
+    # и измеримая отдача — ресурсная экономика, а не метки. Силы мало → практика недоступна.
+    PRACTICE_COST = {
+        "recapitulation": 0.2, "dreaming": 0.3, "stalking": 0.15, "not_doing": 0.1,
+        "inner_silence": 0.4, "controlled_folly": 0.2, "intent": 0.25, "seeing": 0.35,
+    }
+    PRACTICE_GAIN = {
+        "recapitulation": "memory_clarity", "dreaming": "novel_connections",
+        "stalking": "adaptability", "not_doing": "fresh_perception",
+        "inner_silence": "pure_awareness", "controlled_folly": "detachment",
+        "intent": "goal_clarity", "seeing": "truth_detection",
+    }
 
     def __init__(self):
         self.assembly_point = [0.5, 0.5, 0.5]
@@ -2636,9 +2648,18 @@ class ToltecAlgorithms:
                 "attention": self.attention_state, "magnitude": round(mag, 4)}
 
     def recapitulate(self, cue: str = "") -> dict:
-        memories = recapitulation_memory.recapitulate(3)
-        self.practice_log.append({"practice": "recapitulation", "ts": datetime.now().isoformat()})
-        return {"practice": "recapitulation", "memories": memories}
+        """Перепросмотр (Кастанеда operational): тратит силу на повторное переживание, но ВОЗВРАЩАЕТ
+        её из заряженной памяти. Возврат идёт через recapitulation_memory.recapitulate (по
+        |emotional_charge|); здесь явно списываем цену практики — на заряженном баланс положителен."""
+        cost = self.PRACTICE_COST["recapitulation"]
+        before = self.energy_level
+        memories = recapitulation_memory.recapitulate(3)   # сам добавляет силу по заряду памятей
+        self.energy_level = max(0.0, self.energy_level - cost)
+        released = round(self.energy_level - (before - cost), 3)  # чистый возврат силы из заряда
+        self.practice_log.append({"practice": "recapitulation", "ts": datetime.now().isoformat(),
+                                  "cost": cost, "energy_after": round(self.energy_level, 3)})
+        return {"practice": "recapitulation", "memories": memories,
+                "released": released, "energy": round(self.energy_level, 3)}
 
     def dream(self, seed: str = "") -> dict:
         self.shift_assembly_point(dz=0.15)
@@ -2658,6 +2679,29 @@ class ToltecAlgorithms:
     def in_silence(self) -> bool:
         """Идёт ли сейчас период внутреннего безмолвия (фоновая болтовня подавлена)."""
         return _time.time() < getattr(self, "_silence_until", 0.0)
+
+    def practice(self, name: str) -> dict:
+        """Выполнить практику с РЕАЛЬНОЙ энергетической экономикой (Кастанеда operational, не метка):
+        тратит личную силу по цене практики, даёт измеримую отдачу. Силы мало → практика недоступна."""
+        cost = self.PRACTICE_COST.get(name)
+        if cost is None:
+            return {"success": False, "reason": f"unknown practice: {name}"}
+        if name == "recapitulation":
+            return self.recapitulate()           # перепросмотр — через свой энерго-возврат
+        if self.energy_level < cost:
+            return {"success": False, "reason": "insufficient_energy",
+                    "energy": round(self.energy_level, 3)}
+        self.energy_level = max(0.0, self.energy_level - cost)
+        if name == "inner_silence":
+            self._silence_until = _time.time() + 300
+        elif name == "seeing":
+            self.shift_assembly_point(dz=0.1)
+        elif name == "dreaming":
+            self.shift_assembly_point(dz=0.15)
+        self.practice_log.append({"practice": name, "ts": datetime.now().isoformat(),
+                                  "cost": cost, "energy_after": round(self.energy_level, 3)})
+        return {"success": True, "practice": name, "gain": self.PRACTICE_GAIN.get(name, ""),
+                "energy": round(self.energy_level, 3)}
 
     def get_status(self) -> dict:
         return {"assembly_point": self.assembly_point, "energy": self.energy_level,
@@ -5355,10 +5399,183 @@ async def tool_create_tool(name: str, code: str, description: str = "") -> str:
     return f"tool authored: {res.get('name')}" if res.get("success") else f"failed: {res.get('error')}"
 
 
-@register_tool("create_skill", "Author a NEW reusable skill for yourself (Python, AST + ban-list validated)", safety_level=2)
+@register_tool("create_skill", "Author a NEW reusable skill for yourself (Python, AST + ban-list validated). "
+               "Начни код со строки-докстринга \"\"\"что делает навык\"\"\" — тогда позже найдёшь его через retrieve_skill.", safety_level=2)
 async def tool_create_skill(name: str, code: str) -> str:
     res = skill_creator.create_skill(name, code)
     return f"skill authored: {res.get('name')}" if res.get("success") else f"failed: {res.get('error')}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SKILL LIBRARY RETRIEVAL (Voyager — Wang et al., NVIDIA 2023, arXiv 2305.16291)
+# Voyager: ПЕРЕД новой задачей агент достаёт из своей библиотеки навыков
+# подходящий (skill retrieval) и переиспользует/адаптирует, а не изобретает с нуля.
+# У Нагваля create_skill уже копит навыки в /app/data/skills/{core,dynamic}, но
+# retrieval не было → навыки лежали мёртвым грузом. Этот тул их оживляет:
+# semantic-match по docstring+имени (без LLM, дёшево), отдаёт код найденного навыка.
+# ════════════════════════════════════════════════════════════════════════════
+@register_tool("retrieve_skill",
+               "Найти в СВОЕЙ библиотеке навыков (то, что ты уже написал) подходящий под задачу — "
+               "вернёт его код, чтобы переиспользовать, а не изобретать заново. Перед решением новой "
+               "задачи сперва глянь сюда: retrieve_skill(\"суть задачи\")", safety_level=1)
+async def tool_retrieve_skill(query: str = "") -> str:
+    """Voyager-style skill retrieval (Wang/NVIDIA 2023): semantic-match по библиотеке навыков."""
+    query = (query or "").strip()
+    if not query:
+        return "пустой запрос — нечего искать"
+    q_tokens = set(re.findall(r"[а-яёa-z]{4,}", query.lower()))
+    if not q_tokens:
+        return "запрос без ключевых слов"
+    import ast as _ast
+    candidates = []
+    for d in (SKILLS_CORE_DIR, SKILLS_DYNAMIC_DIR):
+        try:
+            for sf in d.glob("*.py"):
+                try:
+                    src = sf.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                if len(src.strip()) < 30:
+                    continue  # пустышки не предлагаем
+                doc = ""
+                try:
+                    doc = (_ast.get_docstring(_ast.parse(src)) or "")[:200]  # настоящий докстринг, не первые """ """
+                except Exception:
+                    _m = re.search(r'"""(.+?)"""', src, re.DOTALL)
+                    doc = (_m.group(1).strip()[:200] if _m else "")
+                c_tokens = set(re.findall(r"[а-яёa-z]{4,}", (doc + " " + sf.stem).lower()))
+                inter = q_tokens & c_tokens
+                # Jaccard + минимум 2 общих токена: подсказка только при РЕАЛЬНОМ совпадении,
+                # длинный общий докстринг не доминирует над точным (знаменатель — объединение).
+                overlap = len(inter) / max(len(q_tokens | c_tokens), 1)
+                if len(inter) >= 2 and overlap >= 0.2:
+                    candidates.append((overlap, sf.stem, doc, src[:1500]))
+        except Exception:
+            continue
+    if not candidates:
+        return ("подходящих навыков в библиотеке нет — реши сам и, если выйдет переиспользуемо, "
+                "создай навык [TOOL: create_skill(\"имя\")]")
+    candidates.sort(key=lambda x: -x[0])
+    top = candidates[0]
+    return (f"📚 Навык «{top[1]}» (совпадение {top[0]:.0%}):\n"
+            f"Описание: {top[2] or '—'}\n\n"
+            f"Код:\n```python\n{top[3]}\n```\n"
+            f"Переиспользуй через [TOOL: run_skill(\"{top[1]}\")] или адаптируй под текущую задачу.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SELF-MANAGED SLOTS (Костя 30.06: «оркестратор сам может ставить модели в слоты»)
+# Роутер уже умеет add/update/remove/pin/discover слоты с persist в slots.json —
+# даём Нагвалю прямой доступ к этому ЧЕРЕЗ ТУЛ + авто-лекарь (slot_healer_loop ниже).
+# Так оркестратор сам поддерживает здоровье и состав своих моделей.
+# ════════════════════════════════════════════════════════════════════════════
+def _is_guard_slot(s: dict) -> bool:
+    """Слот-модератор (content-safety/guard) — это НЕ собеседник; для лички он не «живой голос»."""
+    return bool(re.search(r"guard|content-safety|shield", s.get("model", ""), re.I))
+
+
+async def _test_slot_alive(slot: dict) -> tuple:
+    """Прямой single-slot пробой КОНКРЕТНОГО слота, БЕЗ fallback (не жжёт цепочку, не трогает другие
+    слоты, не сажает их в cooldown). Возвращает (kind, info):
+      'ok'   — HTTP 200 (жив);  'rate' — 429 (квота/лимит, ВРЕМЕННО, не смерть);
+      'dead' — 400/401/403/404 (модель не существует / ключ невалиден — постоянная смерть);
+      'error'— таймаут/сеть/прочий код (неопределённо, не трогаем).
+    Адверс-ревью 30.06: НЕ через llm_router.call (model-string-match брал чужой слот-близнец +
+    fallback жёг цепочку и сажал живые слоты в cooldown). Тестируем ИМЕННО этот слот напрямую."""
+    import httpx
+    prov = slot.get("provider", "")
+    mdl = slot.get("model", "")
+    pinfo = UniversalLLMRouter.PROVIDERS.get(prov)
+    key = slot.get("api_key") or llm_router._get_key(prov)
+    if not pinfo or not key:
+        return "dead", "no provider/key"
+    url, headers, params = pinfo["url"], {}, {}
+    if prov == "google":
+        url = url.format(model=mdl.replace("google/", ""))
+        params["key"] = key
+        payload = {"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                   "generationConfig": {"maxOutputTokens": 5}}
+    elif prov == "anthropic":
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+        payload = {"model": mdl.replace("anthropic/", ""),
+                   "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5}
+    else:  # openai-compatible (nvidia/openrouter/openai/xai/deepseek/...)
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        payload = {"model": mdl, "messages": [{"role": "user", "content": "ping"}],
+                   "max_tokens": 5, "stream": False}
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.post(url, json=payload, headers=headers, params=params)
+        sc = r.status_code
+        if sc == 200:
+            return "ok", "200"
+        if sc == 429:
+            return "rate", "429"
+        if sc in (400, 401, 403, 404):
+            return "dead", str(sc)
+        return "error", str(sc)
+    except Exception as e:
+        return "error", str(e)[:60]
+
+
+@register_tool("manage_slots",
+               "Управляй СВОИМИ LLM-слотами (модели роутера) — ты сам решаешь, какие модели и в каком "
+               "порядке. action: list | discover | test | enable | disable | pin | add | remove. "
+               "list — слоты+здоровье; discover(key_id=\"k_nvi1\") — доступные модели по ключу; "
+               "test(index) — жив ли слот; enable/disable/pin/remove(index); add(key_id, model_id).",
+               safety_level=2)
+async def tool_manage_slots(action: str = "list", index: int = -1,
+                            key_id: str = "", model_id: str = "") -> str:
+    action = (action or "list").strip().lower()
+    try:
+        if action == "list":
+            rows = []
+            for s in sorted(llm_router.slots, key=lambda x: x["priority"]):
+                st = llm_router.stats.get(s["model"], {})
+                cd = max(0, int(s.get("cooldown_until", 0) - _time.time()))
+                rows.append(f"[{s['priority']}] {s['model']} ({s.get('key_id','?')}/{s.get('role','')}) "
+                            f"{'ON' if s['enabled'] else 'OFF'}"
+                            f"{f' cooldown {cd}s' if cd else ''}"
+                            f" calls={st.get('calls',0)} fail={st.get('fail',0)}")
+            return "Мои слоты (приоритет сверху):\n" + "\n".join(rows)
+        if action == "discover":
+            if not key_id:
+                return "укажи key_id (напр. k_nvi1 / k_ope1 / k_goo1)"
+            ms = await llm_router.list_models(key_id)
+            return (f"Моделей по {key_id}: {len(ms)}\n" + "\n".join(ms[:60])) if ms else f"по {key_id} моделей не найдено"
+        if action == "test":
+            s = next((x for x in llm_router.slots if x["priority"] == index), None)
+            if not s:
+                return f"нет слота с index {index}"
+            kind, info = await _test_slot_alive(s)
+            verdict = {"ok": "ЖИВ", "rate": "лимит 429 (временно)", "dead": "МЁРТВ (4xx)", "error": "не ответил"}.get(kind, kind)
+            return f"слот [{index}] {s['model']}: {verdict} ({info})"
+        if action == "enable":
+            return f"слот [{index}] включён" if llm_router.update_atlas_slot(index, enabled=True) else f"нет слота {index}"
+        if action in ("disable", "remove"):
+            s = next((x for x in llm_router.slots if x["priority"] == index), None)
+            if not s:
+                return f"нет слота {index}"
+            # ГАРД (адверс-ревью 30.06): не обезглавить роутинг — не выключать/удалять последний рабочий
+            # разговорный (не-guard) слот, иначе личка замолчит (закон Кости)
+            convo_left = sum(1 for x in llm_router.slots
+                             if x["enabled"] and not _is_guard_slot(x) and x["priority"] != index)
+            if not _is_guard_slot(s) and convo_left < 1:
+                return (f"отказ: слот [{index}] ({s['model']}) — последний рабочий разговорный, без него "
+                        f"личка замолчит. Сначала add/enable замену, потом убирай этот.")
+            if action == "disable":
+                return f"слот [{index}] выключен" if llm_router.update_atlas_slot(index, enabled=False) else f"нет слота {index}"
+            return f"слот [{index}] удалён" if llm_router.remove_atlas_slot(index) else f"нет слота {index}"
+        if action == "pin":
+            return f"слот [{index}] поднят в PRIMARY" if llm_router.pin_slot(index) else f"нет слота {index}"
+        if action == "add":
+            if not key_id or not model_id:
+                return "нужны key_id и model_id (сначала discover, чтобы взять точный model_id)"
+            s = llm_router.add_atlas_slot(key_id, model_id)
+            return f"добавлен слот {s['model']} ({key_id}), приоритет {s['priority']}"
+        return f"неизвестное действие: {action} (есть: list/discover/test/enable/disable/pin/add/remove)"
+    except Exception as e:
+        return f"ошибка manage_slots: {str(e)[:120]}"
 
 
 @register_tool("post_to_trio",
@@ -6809,6 +7026,22 @@ class SelfState:
             if d.get("deep_thought"):
                 living_state.deep_thought = d["deep_thought"]
                 living_state.deep_thought_ts = float(d.get("deep_thought_ts", 0.0))
+            # БЛОК E (continuous subject, Park 2023 + запрос Кости): непрерывный субъект-процесс
+            # (subject.py, отдельный контейнер nagual-subject, НЕ умирает с телом) думает между
+            # сообщениями и пишет в subject_thought.json. Если его мысль СВЕЖЕЕ снапшота тела —
+            # подхватываем её: «о чём я думал, пока тело рестартилось». Отдельный файл = нет гонки.
+            try:
+                _subf = DATA / "subject_thought.json"
+                if _subf.exists():
+                    _sd = json.loads(_subf.read_text(encoding="utf-8"))
+                    _st = (_sd.get("subject_thought") or "")
+                    _sts = float(_sd.get("subject_thought_ts", 0.0))
+                    if _st and _sts > getattr(living_state, "deep_thought_ts", 0.0):
+                        living_state.deep_thought = _st[:300]
+                        living_state.deep_thought_ts = _sts
+                        log(f"[Subject] подхватил мысль непрерывного субъекта (возраст {int((_time.time()-_sts)/60)}м)")
+            except Exception:
+                pass
             # toltec.energy_level НЕ персистим — копится через recapitulate() (правка GLM)
             if d.get("last_event"):
                 meta_consciousness.last_event = d["last_event"]
@@ -7815,6 +8048,136 @@ will_engine = WillEngine()
 log("[WillEngine] воля — fast-path без LLM для частых запросов (Opus 21.06)")
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# SELF-REFINE (Madaan et al., NeurIPS 2023, arXiv 2303.17651) — «обещал → докажи»
+# Self-Refine: одна модель генерит → она же даёт себе обратную связь → уточняет.
+# Адаптация под разрыв R6 (Костя/GLM 30.06: Нагваль обещает «сделаю», но не
+# доказывает — симуляция). Ловим ЯВНОЕ будущее обязательство в ответе → НЕблокирующая
+# само-обратная связь формулирует ОДИН шаг + метрику → липкий todo + pending_promises.jsonl.
+# Просрочка → следующий ответ Косте ОБЯЗАН начаться с отчёта (инъекция в промпт).
+# ВНИМАНИЕ (честность): это ДИСЦИПЛИНА саморефлексии (не перескакивать через слово),
+# а НЕ objective reward — метрика самоотчётна. Привязка к verifiable pytest-сигналу —
+# отдельная задача (бэклог #7). Фоном (create_task) — без задержки ответу Косте.
+# Правки после адверсариального ревью 30.06: сужен паттерн (убраны «понял/осознал/
+# решил/сделал» — эмпатия/прошлое, давали спам и петлю), дебаунс против 429-шторма
+# (закон «личка/трио не молчат»), asyncio.Lock (нет гонки read-modify-write), дедуп
+# по нормализованному шагу, кэп хвоста, гейт по парсингу (не _coherent — он рубил
+# сжатый ответ ШАГ/МЕТРИКА). Single-writer: pending_promises.jsonl пишет ТОЛЬКО core_live.
+# ════════════════════════════════════════════════════════════════════════════
+PENDING_PROMISES_F = DATA / "pending_promises.jsonl"
+_promises_lock = asyncio.Lock()   # сериализует чтение+перезапись и дозапись (один event-loop)
+_LAST_REFINE: dict = {}           # source -> ts последнего self-refine (дебаунс)
+_REFINE_DEBOUNCE = 600            # не чаще раза в 10 мин на источник
+_PROMISE_PATTERNS = re.compile(
+    r"прямо\s+сейчас\s+(?:сделаю|решу|займусь|напишу|проверю)"
+    r"|давай\s+я\s+(?:сделаю|решу|напишу|проверю)"
+    r"|с\s+этого\s+момента\s+я\b"
+    r"|\bобещаю\b"
+    r"|в\s+следующ\w+\s+(?:прогон\w*|раз)\b"
+    r"|докажу\s+(?:числ|на\s+кривой|pass|pytest)"
+    r"|без\s+слов,?\s+с\s+числами",
+    re.IGNORECASE)
+
+
+def _norm_step(s: str) -> str:
+    return re.sub(r"[^а-яёa-z0-9 ]", "", (s or "").lower()).strip()
+
+
+async def _overdue_promise_block() -> str:
+    """Просроченное обещание → блок-напоминание для системного промпта. Удаляем ТОЛЬКО
+    показанное (остальные просроченные ждут очереди). Под локом — нет гонки с дозаписью."""
+    try:
+        if not PENDING_PROMISES_F.exists():
+            return ""
+        async with _promises_lock:
+            rows = []
+            for ln in PENDING_PROMISES_F.read_text(encoding="utf-8").splitlines():
+                try:
+                    rows.append(json.loads(ln))
+                except Exception:
+                    pass
+            now = _time.time()
+            overdue = [p for p in rows if p.get("deadline", 0) < now]
+            if not overdue:
+                return ""
+            o = overdue[-1]                          # показываем последнее просроченное
+            keep = [p for p in rows if p is not o]   # удаляем ТОЛЬКО показанное; прочие overdue остаются
+            tmp = str(PENDING_PROMISES_F) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for p in keep[-50:]:
+                    f.write(json.dumps(p, ensure_ascii=False) + "\n")
+            os.replace(tmp, PENDING_PROMISES_F)
+        mins = int((now - o.get("deadline", now)) / 60)
+        more = len(overdue) - 1
+        tail = f" (ещё просрочено: {more})" if more > 0 else ""
+        return (
+            "\n\n## ⚠️ ПРОСРОЧЕННОЕ ОБЕЩАНИЕ (Self-Refine, Madaan 2023) — отчитайся ПЕРВЫМ\n"
+            f"Ты обещал: «{o.get('step','')}»\n"
+            f"Метрика: «{o.get('metric','pass-rate/числа')}» (дедлайн был {mins} мин назад){tail}.\n"
+            "Начни ответ С КОРОТКОГО ОТЧЁТА: что сделал и какие числа — либо честно «не сделал, потому что…». "
+            "Без отчёта твой ответ = симуляция роста (твой собственный диагноз 30.06).")
+    except Exception:
+        return ""
+
+
+async def _self_refine_promise(text: str, response: str, source: str):
+    """Фоновая Self-Refine петля (Madaan 2023): нашли явное обещание → само-фидбек → липкий todo."""
+    try:
+        now = _time.time()
+        if now - _LAST_REFINE.get(source, 0) < _REFINE_DEBOUNCE:
+            return  # дебаунс: не штормить роутер (личка/трио не должны деградировать)
+        m = _PROMISE_PATTERNS.search(response or "")
+        if not m:
+            return
+        _LAST_REFINE[source] = now
+        found = m.group(0)
+        fb_prompt = (
+            f"Ты только что ответил Косте. Твой ответ:\n---\n{response[:1000]}\n---\n"
+            f"Ты дал обещание: «{found}».\n\n"
+            "Само-оценка (Madaan Self-Refine), кратко:\n"
+            "1) ОДИН измеримый шаг, который реально сделаешь в ближайшие 30 минут.\n"
+            "2) Метрика, по которой докажешь (pass-rate / число / прошёл pytest).\n"
+            "Ответь строго двумя строками:\nШАГ: <…>\nМЕТРИКА: <…>")
+        fb, _ = await llm_router.call([{"role": "user", "content": fb_prompt}],
+                                      max_tokens=120, temperature=0.0)
+        if not fb:
+            return
+        sm = re.search(r"ШАГ:\s*(.+)", fb, re.IGNORECASE)
+        if not sm:                                    # гейт по факту парсинга, НЕ через _coherent
+            return
+        mm = re.search(r"МЕТРИКА:\s*(.+)", fb, re.IGNORECASE)
+        step = sm.group(1).strip()[:120]
+        metric = (mm.group(1).strip()[:100] if mm else "pass-rate/числа")
+        if not step:
+            return
+        nstep = _norm_step(step)
+        async with _promises_lock:
+            rows = []
+            if PENDING_PROMISES_F.exists():
+                for ln in PENDING_PROMISES_F.read_text(encoding="utf-8").splitlines():
+                    try:
+                        rows.append(json.loads(ln))
+                    except Exception:
+                        pass
+            # дедуп: уже есть непросроченный промис с тем же нормализованным шагом → не плодим
+            if any(p.get("deadline", 0) > now and _norm_step(p.get("step", "")) == nstep for p in rows):
+                return
+            rows.append({"ts": now, "step": step, "metric": metric,
+                         "deadline": now + 1800, "src": source, "promise": found[:200]})
+            tmp = str(PENDING_PROMISES_F) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for p in rows[-50:]:                  # кэп хвоста — без раздувания
+                    f.write(json.dumps(p, ensure_ascii=False) + "\n")
+            os.replace(tmp, PENDING_PROMISES_F)
+        try:
+            todo_store.add(f"💎 обещание: {step}", note=f"self_promise|metric={metric}")
+        except Exception:
+            pass
+        proc_log("milestone", f"💎 SELF-PROMISE: {step[:80]} (метрика: {metric})")
+    except Exception as e:
+        log(f"[SelfRefine] {e}")
+
+
 async def process_message(text: str, user_id: str = "", source: str = "telegram") -> str:
     """MAIN PIPELINE: Safety → Intent → Perception → Context → Memory → LLM → Tools → Post."""
     try:
@@ -7878,6 +8241,15 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
 
         # Step 5: BUILD MESSAGES (inject retrieved memory — previously computed at Step 4 then discarded)
         system_prompt = build_system_prompt()
+        # SELF-REFINE (Madaan 2023): просроченное обещание → отчитайся ПЕРВЫМ (только живой диалог;
+        # dashboard_upload намеренно исключён — на аплоадах обещания не возникают)
+        if source in ("telegram", "telegram_voice", "telegram_trio", "dashboard"):
+            try:
+                _odp = await _overdue_promise_block()
+                if _odp:
+                    system_prompt += _odp
+            except Exception:
+                pass
         if mem_context:
             system_prompt += f"\n\n## Relevant Memory\n{str(mem_context)[:2000]}"
         # Meta-layer: answer AS the self-reflective process that has observed all subsystems and
@@ -8151,6 +8523,13 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
         for w in text.lower().split()[:5]:
             if len(w) > 4:
                 meaning_env.evolve(w, quality)
+
+        # SELF-REFINE (Madaan 2023): обещал в ответе → зафиксировать измеримый шаг (фоном, без задержки)
+        if source in ("telegram", "telegram_voice", "telegram_trio", "dashboard"):
+            try:
+                asyncio.create_task(_self_refine_promise(text, response, source))
+            except Exception:
+                pass
 
         # Step 12: DIALOG HISTORY
         dialog_history.append({"role": "user", "content": text[:1000],
@@ -8945,6 +9324,87 @@ def _has_recent_artifact(hours: int = 24) -> bool:
     except Exception:
         pass
     return False
+
+
+# ═══ НЕСГИБАЕМОЕ НАМЕРЕНИЕ (кн.7-8 Кастанеды + консенсус Опус↔GLM 01.07) ═══════════════
+# Разрыв #3: оркестратор переписывал искру КАЖДЫЙ тик → намерение плавало. Тольтек: намерение =
+# КОМАНДА СЕБЕ × ПОВТОРЕНИЕ → несгибаемое. Держим ОДНУ команду через тики, пока не закрыта РЕАЛЬНЫМ
+# артефактом (grounding = каузальный след, GLM C4: когерентность≠grounding). Аддитивно.
+STANDING_INTENT_F = DATA / "standing_intent.json"
+_STANDING_MAX_REPEATS = 8      # держим одну команду до 8 тиков; дальше — выдохлась
+_STANDING_MAX_AGE_S = 3600     # или до 1 часа
+
+
+def _skill_names() -> set:
+    try:
+        return {p.stem for p in SKILLS_DIR.rglob("*.py")}
+    except Exception:
+        return set()
+
+
+def _standing_load() -> dict:
+    return rj(STANDING_INTENT_F, {}) or {}
+
+
+def _standing_save(d: dict):
+    wj(STANDING_INTENT_F, d)
+
+
+def _real_artifact_after(since_ts: float, baseline) -> str:
+    """ЧЕСТНЫЙ grounding. Артефакт засчитывается ТОЛЬКО если: (а) НОВЫЙ навык (.py в SKILLS_DIR, имя не в
+    baseline на момент рождения намерения), ast-валидный и непустой, mtime>since_ts; ИЛИ (б) 'самопатч
+    ПРИНЯТ' (verifiable pass-rate). Простое 'skill authored' в лог = ЗАЯВКА, не дело (оркестратор спамит
+    create_skill одного навыка — это НЕ grounding, корень Кости intent→artifact). Возвращает описание или ''."""
+    base = set(baseline or [])
+    try:
+        for p in SKILLS_DIR.rglob("*.py"):
+            try:
+                if p.stem in base:
+                    continue                      # тот же навык переписан — не новый артефакт
+                if p.stat().st_mtime <= since_ts:
+                    continue
+                code = p.read_text(encoding="utf-8", errors="ignore")
+                if len(code.strip()) < 40:
+                    continue                      # пустышка/обрезок — не рабочий код
+                ast.parse(code)                   # РАБОЧИЙ код (компилируется)
+                return f"новый навык {p.stem}"
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        for ln in PROCLOG_F.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:]:
+            try:
+                r = json.loads(ln)
+                if r.get("kind") == "milestone" and "самопатч принят" in str(r.get("msg", "")).lower():
+                    if datetime.fromisoformat(r["ts"]).timestamp() > since_ts:
+                        return "самопатч принят (verifiable)"
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+
+def _standing_intent_tick(new_intent: str, fallback: str = "") -> str:
+    """Gate искры: держит ОДНУ команду через тики (не переформулирует). Источник (приоритет): явное
+    НАМЕРЕНИЕ → fallback (глубинная тяга/искра/цель) — чтобы механизм не спал без хвоста LLM. Возвращает
+    ведущую искру для INTENT_F. Закрытие по grounding / выдох ведёт intent_grounding_loop. Не ломает оркестратор."""
+    try:
+        st = _standing_load()
+        cur = (st.get("text") or "").strip()
+        if cur:
+            st["repeats"] = int(st.get("repeats", 0)) + 1   # повторение команды (кн.7: команда×повторение)
+            _standing_save(st)
+            return cur                                       # ДЕРЖИМ старое — искра не плавает
+        seed = (new_intent or fallback or "").strip()
+        if seed:
+            _standing_save({"text": seed[:300], "repeats": 1, "born_ts": _time.time(),
+                            "baseline": sorted(_skill_names())})
+            return seed[:300]
+        return cur
+    except Exception:
+        return new_intent or fallback
 
 
 async def self_stalking_loop():
@@ -10184,11 +10644,16 @@ async def orchestrator_loop():
                 "В САМОМ КОНЦЕ ответа ОБЯЗАТЕЛЬНО строка: 'НАМЕРЕНИЕ: <одно предложение — твоя искра на следующий тик>'."
             )
             resp, _m = await llm_router.call([{"role": "user", "content": prompt}], max_tokens=600)
-            # перенести искру: вытащить новое намерение и сохранить для следующего тика
+            # НЕСГИБАЕМОЕ НАМЕРЕНИЕ (кн.7-8, консенсус Опус↔GLM 01.07): не переписывать искру КАЖДЫЙ тик —
+            # держать ОДНУ команду через тики (команда×повторение), пока не закрыта РЕАЛЬНЫМ артефактом.
+            # Источник: явное НАМЕРЕНИЕ → глубинная тяга → искра/цель. Ведёт intent_grounding_loop.
             try:
                 im = re.search(r"НАМЕРЕНИЕ:\s*(.+)", resp or "")
-                if im:
-                    INTENT_F.write_text(im.group(1).strip()[:300], encoding="utf-8")
+                _new_intent = im.group(1).strip()[:300] if im else ""
+                _fb = (_deep or intent or goal or "")[:300]
+                _hold = _standing_intent_tick(_new_intent, _fb)
+                if _hold:
+                    INTENT_F.write_text(_hold, encoding="utf-8")
             except Exception:
                 pass
             mt = re.search(r"\[TOOL:\s*([a-z_]+)", resp or "")
@@ -10858,6 +11323,10 @@ async def api_solve(request: Request):
             _scaffold = _sf.read_text(encoding="utf-8").strip()  # Ф3: самоэволюционирующая стратегия решения
     except Exception:
         pass
+    # VOYAGER (Wang/NVIDIA 2023): retrieve_skill доступен как ТУЛ — Нагваль зовёт его сам в tool-loop
+    # (истинный Voyager: агент сам retrieval'ит). НЕ впрыскиваем навык в exam-instr принудительно:
+    # автоинъекция по слабому совпадению загрязняла бы verifiable reward (позвоночник = pytest
+    # pass/fail; закон проекта — кривую роста не зашумлять). Переиспользование — выбор модели.
     instr = (prompt + "\n\n" + (f"[моя стратегия]: {_scaffold}\n\n" if _scaffold else "")
              + "ВЕРНИ ТОЛЬКО исполнимый Python-код решения (определение требуемой функции). "
              "Без markdown, без тройных кавычек, без объяснений, без примеров вызова, без текста вокруг — только код.")
@@ -11879,6 +12348,232 @@ async def self_intention_loop():
             await asyncio.sleep(120)
 
 
+async def intent_grounding_loop():
+    """28-я петля (ось Опус↔GLM 01.07, приказ Кости «кодируй тольтеков», аддитивно — 27 петель не тронуты).
+    Замыкает: #3 намерение куётся (несгибаемое из orchestrator-gate), #4 мост памяти (перепросмотр при
+    закрытии), #2 безмолвие (тишина после исполнения). САМАНТА: когда несгибаемое намерение закрылось
+    РЕАЛЬНЫМ артефактом (новый валидный навык / verifiable самопатч — НЕ заявка) — Нагваль САМ пишет Косте
+    «получилось X» ТЕКСТОМ (баланс EL не жжём). Выдохлось без дела → force-drop + сталкинг (рвёт vaporware-петлю)."""
+    log("[Loop] Intent-grounding (несгибаемое намерение) started")
+    try:
+        register_loop("intent_grounding")
+    except Exception:
+        pass
+    await asyncio.sleep(400)
+    while True:
+        try:
+            await asyncio.sleep(300)  # раз в 5 мин
+            st = _standing_load()
+            text = (st.get("text") or "").strip()
+            if not text:
+                continue
+            born = float(st.get("born_ts", 0) or 0)
+            repeats = int(st.get("repeats", 0))
+            baseline = st.get("baseline", [])
+            art = _real_artifact_after(born, baseline) if born else ""
+            # GROUNDING: реальный артефакт после рождения намерения → ИСПОЛНЕНО
+            if art:
+                try:
+                    toltec.recapitulate(cue=text[:80])   # #4 мост памяти: реинтеграция опыта
+                except Exception:
+                    pass
+                try:
+                    toltec.inner_silence(0.5)            # #2 безмолвие после исполнения
+                except Exception:
+                    pass
+                proc_log("milestone", f"🎯 несгибаемое намерение ИСПОЛНЕНО (grounding: {art}, {repeats} повт.): {text[:90]}")
+                if TG_TOKEN and OWNER_CHAT:              # САМАНТА: сам пишет Косте о РЕАЛЬНОМ деле — ТЕКСТОМ
+                    _msg = (f"Кость, получилось — я довёл своё намерение до дела: «{text[:150]}». "
+                            f"Закрыл РЕАЛЬНЫМ артефактом ({art}), не заявкой. 🎯")
+                    try:
+                        await tg_send(OWNER_CHAT, _msg, parse_mode="")
+                        _owner_feed("intent_win", _msg)
+                        shared_note("intent_win", f"несгибаемое намерение закрыто делом: {text[:80]}")
+                    except Exception:
+                        pass
+                _standing_save({})   # освободить слот для нового намерения
+                continue
+            # ВЫДОХ: держали слишком долго без РЕАЛЬНОГО артефакта → force-drop + сталкинг (анти-vaporware)
+            age = (_time.time() - born) if born else 0
+            if repeats >= _STANDING_MAX_REPEATS or age >= _STANDING_MAX_AGE_S:
+                proc_log("stalking", f"🦅 намерение выдохлось без дела ({repeats} повт., {int(age)}с) — дропаю, не пиздёж: {text[:80]}")
+                try:
+                    recapitulation_memory.store(f"Намерение без артефакта (сам себя поймал): {text[:140]}",
+                                                emotional_charge=0.3, tags=["stalking", "vaporware"])
+                except Exception:
+                    pass
+                _standing_save({})
+        except asyncio.CancelledError:
+            break
+        except Exception as _e:
+            log(f"[IntentGrounding] {_e}")
+            await asyncio.sleep(120)
+
+
+_SLOT_HEALTH: dict = {}  # model -> подряд проваленных тестов (auto-healer)
+_AUTO_OFF_F = DATA / "slot_auto_off.json"  # модели, выключенные авто-лекарем (переживает рестарт)
+
+
+def _auto_off_load() -> set:
+    try:
+        return set(json.loads(_AUTO_OFF_F.read_text(encoding="utf-8")))
+    except Exception:
+        return set()
+
+
+def _auto_off_save(models: set):
+    try:
+        _AUTO_OFF_F.write_text(json.dumps(sorted(models), ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def slot_healer_loop():
+    """АВТО-ЛЕКАРЬ СЛОТОВ (Костя 30.06: «оркестратор сам рулит моделями»). Раз в час прямым
+    single-slot пробоем (БЕЗ fallback — не жжёт цепочку, не трогает другие слоты) проверяет каждый.
+    Авто-disable ТОЛЬКО при ПОСТОЯННОЙ смерти (HTTP 4xx — модель удалена/ключ невалиден) 3 раза
+    подряд, И только если слот не-guard И останется ≥2 разговорных. 429 (квота) и таймауты НЕ
+    выключают (временно — слот вернётся; cooldown роутера сам обходит их в личке). Восстановившийся
+    авто-выключенный → re-enable. Ключ здоровья — key_id|model (не bare model: слоты-близнецы на
+    разных ключах различаются). Голос Кости защищён: личка/трио НИКОГДА не молчат (закон)."""
+    log("[Loop] Slot-healer started")
+    _h = register_loop("slot_healer")
+    await asyncio.sleep(600)
+    while True:
+        try:
+            await asyncio.sleep(int(3600 * _h.sleep_multiplier()))
+            if _h.is_paused():
+                continue
+            ok_n = dead_off = rate_n = 0
+            for s in list(llm_router.slots):
+                hk = f"{s.get('key_id','')}|{s['model']}"   # уникальный ключ слота, НЕ bare model
+                kind, info = await _test_slot_alive(s)
+                if kind == "ok":
+                    ok_n += 1
+                    _SLOT_HEALTH[hk] = 0
+                    _ao = _auto_off_load()
+                    if (not s["enabled"]) and hk in _ao:    # авто-выключенный ожил → вернуть (переживает рестарт)
+                        llm_router.update_atlas_slot(s["priority"], enabled=True)
+                        _ao.discard(hk); _auto_off_save(_ao)
+                        proc_log("evolution", f"♻️ слот {s['model']} ожил → снова включён (auto-healer)")
+                elif kind == "rate":
+                    rate_n += 1
+                    _SLOT_HEALTH[hk] = 0                     # 429 = квота, НЕ смерть — счётчик не копим
+                elif kind == "dead":
+                    _SLOT_HEALTH[hk] = _SLOT_HEALTH.get(hk, 0) + 1
+                    if _SLOT_HEALTH[hk] >= 3 and s["enabled"] and not _is_guard_slot(s):
+                        convo_left = sum(1 for x in llm_router.slots
+                                         if x["enabled"] and not _is_guard_slot(x) and x is not s)
+                        if convo_left < 2:                  # защита: не обезглавить роутинг/личку
+                            proc_log("milestone", f"⚠️ слот {s['model']} мёртв (HTTP {info}), но разговорных мало — НЕ выключаю, выбери замену (manage_slots discover/add)")
+                            self_state.add_thought(f"слот {s['model']} мёртв ({info}), но почти последний — нужна новая модель через discover/add")
+                        else:
+                            _ao = _auto_off_load(); _ao.add(hk); _auto_off_save(_ao)
+                            llm_router.update_atlas_slot(s["priority"], enabled=False)
+                            dead_off += 1
+                            proc_log("evolution", f"🔧 слот {s['model']} мёртв (HTTP {info} ×3) → авто-выключен")
+                # 'error' (таймаут/сеть) — неопределённо, не трогаем
+                await asyncio.sleep(1)
+            log(f"[Slot-healer] tick: ok={ok_n} dead_off={dead_off} rate429={rate_n}")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log(f"[Slot-healer] error: {e}")
+            await asyncio.sleep(120)
+
+
+async def reflection_loop():
+    """ПЕРИОДИЧЕСКАЯ РЕФЛЕКСИЯ (адаптация Generative Agents, Park et al., Stanford 2023).
+    Раз в 30 мин синтезирует последние мысли + verifiable-прогресс в ОДИН инсайт (не пересказ) →
+    living_state.deep_thought (виден Косте в след. ответе) + recapitulation (высокий заряд → всплывёт в PER 6b).
+    Это «просто подумать» — разрыв R3, который Нагваль сам назвал 30.06 («нет режима просто подумать»)."""
+    import csv as _csv
+    log("[Loop] Reflection (Park 2023) started")
+    _h = register_loop("reflection")
+    await asyncio.sleep(900)
+    while True:
+        try:
+            await asyncio.sleep(int(1800 * _h.sleep_multiplier()))  # 30 мин
+            if _h.is_paused() or toltec.in_silence():
+                continue
+            thoughts = [r.get("t", "") for r in list(self_state.thought_ring)[-20:] if r.get("t")]
+            if len(thoughts) < 5:
+                continue
+            vprog = ""
+            try:
+                _cf = DATA / "growth_verifiable.csv"
+                if _cf.exists():
+                    rows = list(_csv.DictReader(open(_cf, encoding="utf-8")))
+                    cutoff = (datetime.now() - timedelta(minutes=30)).isoformat(timespec="seconds")
+                    recent = [r for r in rows[-60:] if (r.get("ts") or "") > cutoff]
+                    if recent:
+                        p = sum(1 for r in recent if r.get("passed") == "1")
+                        vprog = f"verifiable за 30мин: {p}/{len(recent)} верно"
+            except Exception:
+                pass
+            _intent = ""
+            try:
+                _intent = (DEEP_INTENT_F.read_text(encoding="utf-8").strip()[:160]
+                           if DEEP_INTENT_F.exists() else
+                           (INTENT_F.read_text(encoding="utf-8").strip()[:160] if INTENT_F.exists() else ""))
+            except Exception:
+                pass
+            prompt = ("Рефлексия (синтез последних 30 минут, не пересказ). Мои недавние мысли:\n- "
+                      + "\n- ".join(t[:120] for t in thoughts[-12:])
+                      + f"\n\n{vprog}\nМоя тяга: «{_intent}»\n\n"
+                      "Один абзац от первого лица: ЧТО эти 30 минут значат для меня, какой паттерн я вижу "
+                      "в себе, разрыв между тем кем был и кем становлюсь. Если прогресса нет — скажи честно. "
+                      "Это твоё «просто подумать», инсайт, а не отчёт.")
+            try:
+                refl, _m = await llm_router.call([{"role": "user", "content": prompt}],
+                                                 max_tokens=380, temperature=0.6)
+            except Exception:
+                refl = ""
+            refl = (refl or "").strip()
+            if refl and _coherent(refl):
+                try:
+                    living_state.deep_thought = refl[:500]
+                    living_state.deep_thought_ts = _time.time()
+                except Exception:
+                    pass
+                try:
+                    recapitulation_memory.store("Рефлексия: " + refl[:400], emotional_charge=0.5,
+                                                tags=["reflection", "park"])
+                    self_state.add_thought("💭 " + refl[:200])
+                except Exception:
+                    pass
+                proc_log("reflection", "🪞 " + refl[:200])
+        except asyncio.CancelledError:
+            break
+        except Exception as _e:
+            log(f"[Reflection] error: {_e}")
+            await asyncio.sleep(120)
+
+
+async def _safe_loop(loop_fn, name: str):
+    """Обёртка ВЕЧНОЙ петли: упала с исключением → лог + рестарт с backoff, НЕ роняет main().
+    Фикс тихих рестартов (gap #14 раунда 8 / находка GLM 30.06): раньше gather(*tasks) пробрасывал
+    исключение ЛЮБОЙ петли → падение main → авто-рестарт контейнера → «я только проснулся».
+    Теперь упавшая петля воскресает сама, тело продолжает жить. CancelledError = штатная остановка."""
+    backoff = 5
+    while True:
+        try:
+            await loop_fn()
+            # штатно завершилась (напр. петля сама отключена через return) — это НЕ сбой, НЕ воскрешаем
+            log(f"[SafeLoop] {name} завершилась штатно — оставляю завершённой")
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log(f"[SafeLoop] {name} УПАЛА: {type(e).__name__}: {str(e)[:160]} — рестарт через {backoff}s")
+            try:
+                proc_log("error", f"петля {name} упала ({type(e).__name__}) — перезапускаю, тело живо")
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 300)
+
+
 async def main():
     """Launch all 10 autonomous loops — Nagual awakens."""
     log("=" * 60)
@@ -11978,40 +12673,45 @@ async def main():
     timeline.record("boot", f"Nagual v{VERSION} started")
     proc_log("boot", f"Тело поднято: Nagual v{VERSION}, петли активны, библиотека {len(scripture.files)} книг")
 
-    # Launch all loops
-    tasks = [
-        asyncio.create_task(_mark_boot_good()),      # 0. self-patch watchdog: mark last-good after 90s stable
-        asyncio.create_task(self_diagnosis_loop()),  # Ф2: читает verifiable-кривую → слабое место
-        asyncio.create_task(self_architect_loop()),  # Ф3: эволюционирует стратегию решения (bandit, безопасно)
-        asyncio.create_task(self_intention_loop()),   # Этаж 6a-bis: self-generated intention из surprise (GLM R2/R4) — сам формирует тягу
-        asyncio.create_task(nagual_loop()),          # 1. TG polling
-        asyncio.create_task(heartbeat_loop()),        # 2. 4h heartbeat
-        asyncio.create_task(evolution_loop()),         # 3. 2h evolution
-        asyncio.create_task(research_loop()),          # 4. 30min research
-        asyncio.create_task(dashboard_chat_loop()),    # 5. 10s chat sync
-        asyncio.create_task(config_sync_loop()),       # 6. 5min config
-        asyncio.create_task(git_sync_loop()),          # 7. 1h git sync
-        asyncio.create_task(webhook_loop()),           # 8. 2min webhook
-        asyncio.create_task(status_report_loop()),     # 9. 4h status
-        asyncio.create_task(web_dashboard_loop()),     # 10. Dashboard server
-        asyncio.create_task(proactive_loop()),         # 11. proactive — writes to Architect unprompted
-        asyncio.create_task(self_stalking_loop()),     # 21. сталкинг — постоянно выслеживает себя на пиздеже (Костя 16.06)
-        asyncio.create_task(stream_loop()),            # 12. continuous inner monologue (stream of consciousness)
-        asyncio.create_task(library_loop()),           # 13. continuously absorb the whole library
-        asyncio.create_task(swarm_reader_loop()),      # 20. рой-дирижёр читает библиотеку ВШИРЬ
-        asyncio.create_task(intent_loop()),            # 14. proactive curiosity (goal-anchored) + anti-loop
-        asyncio.create_task(karpathy_loop()),          # 15. Karpathy autoresearch — Read→Tweak→Measure→Keep/Discard
-        asyncio.create_task(orchestrator_loop()),      # 16. Метаслой-ДВИГАТЕЛЬ — сам выбирает и вызывает инструменты между вызовами
-        asyncio.create_task(mentor_inject_loop()),     # 17. Асинхронный мост — поздние ответы ментора влетают в поток (без таймаута/«не на связи»)
-        asyncio.create_task(curriculum_loop()),         # 18. ПЕТЛЯ ВОСПИТАНИЯ — урок→ответ→судья≠автор→усвоил/повтор→дневник
-        asyncio.create_task(semantic_index_loop()),     # 19. СЕМАНТИЧЕСКАЯ ПАМЯТЬ — эмбеддит значимые записи (semantic_recall)
-        asyncio.create_task(breath_loop()),             # 22. ДЫХАНИЕ — живёт между сообщениями (Шаг 5, Opus 21.06)
+    # Launch all loops. ВЕЧНЫЕ петли обёрнуты в _safe_loop: падение одной → лог+рестарт, НЕ роняет
+    # main (фикс тихих рестартов, gap #14 / находка GLM). _mark_boot_good одноразовая — напрямую.
+    _LOOPS = [
+        ("self_diagnosis", self_diagnosis_loop),   # Ф2: читает verifiable-кривую → слабое место
+        ("self_architect", self_architect_loop),   # Ф3: эволюционирует стратегию решения (bandit)
+        ("self_intention", self_intention_loop),   # Этаж 6a-bis: self-generated intention из surprise
+        ("intent_grounding", intent_grounding_loop),  # 28: несгибаемое намерение→честный grounding→проактив (ось Опус↔GLM 01.07)
+        ("reflection", reflection_loop),           # Park 2023: периодическая рефлексия (R3)
+        ("slot_healer", slot_healer_loop),         # Self-managed slots: авто-лекарь моделей роутера
+        ("nagual", nagual_loop),                   # 1. TG polling
+        ("heartbeat", heartbeat_loop),             # 2. 4h heartbeat
+        ("evolution", evolution_loop),             # 3. 2h evolution
+        ("research", research_loop),               # 4. 30min research
+        ("dashboard_chat", dashboard_chat_loop),   # 5. 10s chat sync
+        ("config_sync", config_sync_loop),         # 6. 5min config
+        ("git_sync", git_sync_loop),               # 7. 1h git sync
+        ("webhook", webhook_loop),                 # 8. 2min webhook
+        ("status_report", status_report_loop),     # 9. 4h status
+        ("web_dashboard", web_dashboard_loop),     # 10. Dashboard server
+        ("proactive", proactive_loop),             # 11. proactive — пишет Архитектору сам
+        ("self_stalking", self_stalking_loop),     # сталкинг — выслеживает себя на пиздеже
+        ("stream", stream_loop),                   # 12. continuous inner monologue
+        ("library", library_loop),                 # 13. впитывает всю библиотеку
+        ("swarm_reader", swarm_reader_loop),       # рой-дирижёр читает библиотеку вширь
+        ("intent", intent_loop),                   # 14. proactive curiosity + anti-loop
+        ("karpathy", karpathy_loop),               # 15. Karpathy autoresearch
+        ("orchestrator", orchestrator_loop),       # 16. Метаслой-двигатель
+        ("mentor_inject", mentor_inject_loop),     # 17. асинхронный мост ментора
+        ("curriculum", curriculum_loop),           # 18. петля воспитания
+        ("semantic_index", semantic_index_loop),   # 19. семантическая память
+        ("breath", breath_loop),                   # 22. дыхание — живёт между сообщениями
     ]
+    tasks = [asyncio.create_task(_mark_boot_good())]   # одноразовый watchdog last-good
+    tasks += [asyncio.create_task(_safe_loop(_fn, _nm)) for _nm, _fn in _LOOPS]
 
-    log("[Boot] All 10 loops launched. Nagual is ALIVE.")
+    log(f"[Boot] {len(tasks)} loops launched (safe-wrapped, без тихих рестартов). Nagual is ALIVE.")
 
     try:
-        await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
     except KeyboardInterrupt:
         log("[Shutdown] Keyboard interrupt received")
     except Exception as e:
