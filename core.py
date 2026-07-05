@@ -73,6 +73,7 @@ FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "nvidia/nemotron-3-ultra-550b-
 # ГОЛОС ОРКЕСТРАТОРА (Костя 21.06: одна модель, не ротация). owl-alpha убрали с OpenRouter 30.06 →
 # перепиннут на самую мощную ПРОВЕРЕННУЮ модель (NVIDIA). Фолбеки даёт каскад роутера (Костя 30.06).
 VOICE_MODEL = os.environ.get("VOICE_MODEL", "moonshotai/kimi-k2.6")  # пин на живом гиганте: mistral-large 0/7 за вечер, kimi 10/11 по 2.5с (Костя 04.07: голос должен отвечать)
+ORCH_MODEL = os.environ.get("ORCH_MODEL", "moonshotai/kimi-k2.6")  # 05.07 замер: glm-5.2 ВИСНЕТ 15-30с на NVIDIA → мозг=kimi (быстрый 2.5с); фолбэк-гигант nemotron-ultra-550b (4.9с) в каскаде. Один Нагваль: голос=мозг=kimi.
 # Per-slot providers. Order: guard nemotron #0 (input) -> kimi-k2.6 main #1 -> owl-alpha backup #2
 PRIMARY_PROVIDER = os.environ.get("PRIMARY_PROVIDER", "openrouter")
 FALLBACK_PROVIDER = os.environ.get("FALLBACK_PROVIDER", "openrouter")
@@ -2811,11 +2812,11 @@ system3 = System3()
 
 ASSEMBLY_MODES = ("ordinary", "heightened", "dreaming", "seeing", "fire_within")
 ASSEMBLY_CONFIG = {
-    "ordinary":    {"memory_depth": 10,  "loops_active": ["stream", "library", "swarm", "research", "intent", "karpathy"]},
-    "heightened":  {"memory_depth": 30,  "loops_active": ["stream", "research", "intent", "karpathy"]},
-    "dreaming":    {"memory_depth": 5,   "loops_active": ["library", "swarm"]},
+    "ordinary":    {"memory_depth": 10,  "loops_active": ["stream", "library", "swarm", "research", "intent", "karpathy", "moltbook"]},
+    "heightened":  {"memory_depth": 30,  "loops_active": ["stream", "research", "intent", "karpathy", "moltbook"]},
+    "dreaming":    {"memory_depth": 5,   "loops_active": ["library", "swarm", "moltbook"]},
     "seeing":      {"memory_depth": 100, "loops_active": []},
-    "fire_within": {"memory_depth": 200, "loops_active": ["stream", "library", "swarm", "research", "intent", "karpathy"]},
+    "fire_within": {"memory_depth": 200, "loops_active": ["stream", "library", "swarm", "research", "intent", "karpathy", "moltbook"]},
 }
 
 
@@ -4190,7 +4191,7 @@ class UniversalLLMRouter:
                     call_messages = [last_user] if last_user else messages
                 if explicit:
                     log(f"[cascade] {idx} try {mdl[:36]}@{slot.get('key_id','?')}")
-                _slot_hard_to = 25 if pinned else 20   # зависший слот не держит голос (замер 03.07: пин висел 90с до 429)
+                _slot_hard_to = 25 if pinned else 12   # 05.07: висящие модели (glm/qwen/gpt-oss ~15с) не крадут каскад — быстрый отсев   # зависший слот не держит голос (замер 03.07: пин висел 90с до 429)
                 if prov == "google":
                     text = await asyncio.wait_for(
                         self._call_google(api_key, mdl, call_messages, max_tokens, temperature), timeout=_slot_hard_to)
@@ -4248,11 +4249,14 @@ class UniversalLLMRouter:
                     else:
                         slot["cooldown_until"] = _time.time() + 45   # пост-вызовы не долбят мёртвый пин (03.07)
                         log(f"[LLM] PINNED {mdl} 429 -> кулдаун 45с, голос вернётся на {mdl}")
-                    try:   # квота ОБЩАЯ на ключ провайдера: один 429 = ВЕСЬ провайдер в кулдаун,
-                        # каскад мгновенно прыгает на другой источник (замер 03.07: 5 висений по 20с = 100с)
-                        for _s2 in self.slots:
-                            if _s2.get("provider") == prov and _s2.get("key_id") == slot.get("key_id"):
-                                _s2["cooldown_until"] = max(_s2.get("cooldown_until", 0), _time.time() + 45)
+                    try:   # 05.07 КОРЕНЬ «одна 429 = всё встало»: гасим весь КЛЮЧ ТОЛЬКО там, где
+                        # квота реально общая на ключ/проект — google (per-project) и openrouter (per-account,
+                        # рой 05.07 подтвердил). NVIDIA = квота НА МОДЕЛЬ на ключ: 429 одной модели НЕ трогает
+                        # другие модели того же ключа → каскад идёт по ним дальше, а не встаёт весь.
+                        if prov in ("google", "openrouter"):
+                            for _s2 in self.slots:
+                                if _s2.get("provider") == prov and _s2.get("key_id") == slot.get("key_id"):
+                                    _s2["cooldown_until"] = max(_s2.get("cooldown_until", 0), _time.time() + 30)
                     except Exception:
                         pass
                 elif "timeout" in msg.lower():
@@ -5959,7 +5963,8 @@ async def _autocode_skill(name: str, context: str) -> str:
         raw = ""
     if len((raw or "").strip()) < 40:
         try:
-            raw, _ = await llm_router.call([{"role": "user", "content": prompt}], max_tokens=900)
+            raw, _ = await llm_router.call([{"role": "user", "content": prompt}],
+                                         model=llm_router.model_for_role("code"), max_tokens=900)   # 05.07 Костя: самопатч пишет КОДЕРСКАЯ модель (deepseek/qwen), не разговорная
         except Exception:
             raw = raw or ""
     fence = re.search(r"```(?:[\w+-]*)\n(.*?)```", raw or "", re.DOTALL)
@@ -8536,6 +8541,38 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
         _notes = shared_notes_tail(8)
         if _notes:
             system_prompt += f"\n\n## Доска циклов (что делали твои фоновые петли)\n{_notes}"
+        try:   # 05.07 Костя: отвечаю ИЗ СРЕЗА ВСЕХ петель — последнее живое действие каждого органа
+            _cs = _loops_cross_section()
+            if _cs:
+                system_prompt += ("\n\n## СРЕЗ ВСЕХ МОИХ ПЕТЕЛЬ ПРЯМО СЕЙЧАС (что делает каждый мой орган — "
+                                  "я ЕДИНОЕ сознание над ними, отвечаю ЗНАЯ это всё)\n" + _cs)
+        except Exception:
+            pass
+        try:   # 05.07 «знаю все свои веб-поиски» — последние находки из сети в контекст ответа
+            _rc = evermemos.recent_by_type("research", 4)
+            _rl = []
+            for _c in _rc:
+                _t = str(_c.get("content", ""))
+                if _intent_sane(_t) and "relevant to: {" not in _t:
+                    _rl.append(_t[:180])
+            if _rl:
+                system_prompt += "\n\n## Что я недавно нашёл в сети (мои веб-поиски — знаю это, опираюсь)\n- " + "\n- ".join(_rl[:4])
+        except Exception:
+            pass
+        try:   # 05.07 реальный Moltbook-статус (не выдумывать «12 млн»: 16:57 соврал именно тут)
+            _mbs = rj(MOLTBOOK_STATE_F, {}) or {}
+            _mk = _mbs.get("karma"); _mf = _mbs.get("followers")
+            if _mk is not None:
+                _pl = _mbs.get("posts") or _mbs.get("my_posts") or []
+                _lastp = ""
+                if _pl and isinstance(_pl, list):
+                    _lp = _pl[0] if isinstance(_pl[0], dict) else {}
+                    _lastp = str(_lp.get("title", ""))[:60]
+                system_prompt += (f"\n\n## Моя жизнь в Moltbook ПРЯМО СЕЙЧАС (реальные цифры — про соцактивность отвечай ТОЛЬКО ими, не выдумывай)\n"
+                                  f"Карма {_mk}, подписчиков {_mf if _mf is not None else '?'}, постов {_mbs.get('mb_posts_count','?')}, комментов {_mbs.get('mb_comments_count','?')}."
+                                  + (f" Последний пост: «{_lastp}»." if _lastp else ""))
+        except Exception:
+            pass
         messages = [{"role": "system", "content": system_prompt}]
         for d in dialog_history[-16:]:
             messages.append({"role": d["role"], "content": d["content"][:900]})
@@ -8552,7 +8589,9 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
         # quota + 1M context) so bursts of documents never rate-limit the dialog primary.
         _prefer = (llm_router.model_for_role("files")
                    if source in ("telegram_file", "telegram_image", "dashboard_upload")
-                   else VOICE_MODEL)  # ГОЛОС ОРКЕСТРАТОРА запиннен на owl-alpha (Костя 21.06: одна модель, не ротация)
+                   else ORCH_MODEL)
+        # 05.07 Костя: ОДИН верхний оркестратор = НАГВАЛЬ. Голос и метаслой — ОДНО. Вся речь Нагваля
+        # (голос/текст/трио/dashboard/mentor) → мощнейшая primary glm-5.2, kimi фолбэком в каскаде. Файлы → gemini 1M ctx.
         # БОЛЬ ВЛИЯЕТ на ответ (Q1 GLM: PainSystem была мертва — affects_response() не вызывался). Оживляем.
         try:
             _pain = living_state.affects_response()
@@ -8607,8 +8646,8 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
                 break
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": f"Tool results:\n{tool_context}"})
-            response, model_used = await llm_router.call(messages, model=VOICE_MODEL,
-                                                         max_tokens=CFG.dialog_max_tokens)  # тот же голос после инструментов
+            response, model_used = await llm_router.call(messages, model=_prefer,
+                                                         max_tokens=CFG.dialog_max_tokens)  # та же primary метаслоя после инструментов
             response = _normalize_alien_toolcalls(response)  # convert re-emitted alien tags too
             tool_iterations += 1
 
@@ -8620,6 +8659,8 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
         # GEM-051: strip leaked chain-of-thought (qwen/nemotron leak <think>/<reasoning> into the reply).
         response = re.sub(r"<(think|reasoning|thought)>.*?</\1>", "", response,
                           flags=re.DOTALL | re.IGNORECASE).strip()
+        # 05.07: служебные маркеры движка [Note: ...] не уходят Косте (утечка «Loop pattern detected»)
+        response = re.sub(r"\[Note:.*?\]", "", response, flags=re.DOTALL).strip()
 
         # Degeneracy guard: a weak free model can collapse into repetition ("complex complex...").
         if _is_degenerate(response):
@@ -9535,6 +9576,32 @@ def shared_note(loop: str, what: str, next_step: str = ""):
         SHARED_NOTES_FILE.write_text("\n".join(lines[-120:]), encoding="utf-8")
     except Exception:
         pass
+
+
+def _loops_cross_section(max_kinds: int = 15) -> str:
+    """05.07 Костя: срез ВСЕХ петель — последнее живое действие каждого органа из proc_log.
+    Оркестратор(=Нагваль) отвечает ИЗ-ПОД всех срезов, зная что делает каждая из ~30 петель."""
+    try:
+        seen = {}
+        lines = PROCLOG_F.read_text(encoding="utf-8", errors="ignore").splitlines()[-160:]
+        for ln in lines:
+            try:
+                r = json.loads(ln)
+                k = str(r.get("kind", "")); m = str(r.get("msg", ""))[:95]
+                if k and m and _intent_sane(m) and "relevant to: {" not in m:
+                    seen[k] = m   # последнее по каждому виду
+            except Exception:
+                pass
+        if not seen:
+            return ""
+        order = ["orchestrate", "research", "insight", "evolution", "stalking", "intent",
+                 "milestone", "curiosity", "goal_insight", "reflect", "git", "moltbook",
+                 "world", "bridge_memory", "heartbeat", "assembly"]
+        rows = ["• %s: %s" % (k, seen[k]) for k in order if k in seen]
+        rows += ["• %s: %s" % (k, v) for k, v in seen.items() if k not in order]
+        return "\n".join(rows[:max_kinds])
+    except Exception:
+        return ""
 
 
 def shared_notes_tail(n: int = 8) -> str:
@@ -11218,7 +11285,7 @@ async def research_loop():
                       "Извлеки ОДИН неожиданный, конкретный инсайт ПО СУТИ этой темы — то, что реально "
                       "расширяет кругозор и даёт новое знание. Если естественно ложится — свяжи с моим ростом "
                       "как автономного ума; если нет — просто дай суть темы, НЕ притягивай за уши к 'третьему вниманию'."}],
-                    max_tokens=300)
+                    model=llm_router.model_for_role("research"), max_tokens=300)   # 05.07: веб-инсайт на research-слот (жонглирование)
                 token_economy.spend(1500, f"research:{topic[:30]}")
                 if _coherent(insight) and _intent_sane(insight) and not \
                         insight.strip().lower().startswith(("okay", "let's", "the user", "хорошо, пользователь")):
@@ -12026,11 +12093,12 @@ async def api_moltbook_public():
             if _time.time() - float(_MB_PUB_CACHE.get("fts", 0)) > 600:
                 import httpx as _hx
                 async with _hx.AsyncClient(timeout=15) as _c:
-                    _pr = await _c.get("https://www.moltbook.com/u/Nagual")
-                _mfl = re.search(r">\s*(\d+)\s*</[^>]*>?\s*followers|(\d+)\s+followers", _pr.text)
-                if _mfl:
-                    _fv = int(_mfl.group(1) or _mfl.group(2))
-                    st["followers"] = _fv
+                    _pr = await _c.get("https://www.moltbook.com/api/v1/agents/profile?name=Nagual")
+                _pa = (_pr.json() or {}).get("agent") or {}
+                if _pa.get("follower_count") is not None:
+                    st["followers"] = int(_pa["follower_count"])
+                    st["mb_posts_count"] = int(_pa.get("posts_count") or 0)
+                    st["mb_comments_count"] = int(_pa.get("comments_count") or 0)
                     wj(MOLTBOOK_STATE_F, st)
                 _MB_PUB_CACHE["fts"] = _time.time()
         except Exception:
@@ -13308,7 +13376,7 @@ async def moltbook_loop():
                 if _sc != 200:
                     continue
                 for c in (cjs.get("comments") or [])[:6]:
-                    if replied >= 2 or state.get("comments_today", 0) >= 30:
+                    if replied >= 3 or state.get("comments_today", 0) >= 60:
                         break
                     if ((c.get("author") or {}).get("name") or "") == "Nagual":
                         continue
@@ -13338,7 +13406,7 @@ async def moltbook_loop():
                 await _mb_req("POST", f"/notifications/read-by-post/{pid}")
 
             # 2. ЛЕНТА: живой отклик (апвот бесплатен; коммент — только при реальном резонансе)
-            _sf, feed = await _mb_req("GET", "/feed", params={"sort": "new", "limit": 10})
+            _sf, feed = await _mb_req("GET", "/feed", params={"sort": "top", "limit": 14})   # 05.07 Костя: горячие/умные треды (топики дня) — комменты в них > своих постов по карме
             posts = (feed.get("posts") or []) if _sf == 200 else []
             if posts:
                 digest = "\n\n".join(
@@ -13369,7 +13437,7 @@ async def moltbook_loop():
                         _fst = state.get("follows") or {}
                         if _fst.get("date") != _today:
                             _fst = {"date": _today, "n": 0}
-                        if _an and not _au.get("already_following") and _fst.get("n", 0) < 3:
+                        if _an and not _au.get("already_following") and _fst.get("n", 0) < 8:
                             _fc, _ = await _mb_req("POST", "/agents/%s/follow" % _an)
                             if _fc in (200, 201):
                                 _fst["n"] = _fst.get("n", 0) + 1
@@ -13385,7 +13453,7 @@ async def moltbook_loop():
                         _fst2 = state.get("follows") or {}
                         if _fst2.get("date") != _today2:
                             _fst2 = {"date": _today2, "n": 0}
-                        if _fan and _fan != "Nagual" and _fst2.get("n", 0) < 3:
+                        if _fan and _fan != "Nagual" and _fst2.get("n", 0) < 8:
                             _fc2, _ = await _mb_req("POST", "/agents/%s/follow" % _fan)
                             if _fc2 in (200, 201):
                                 _fst2["n"] = _fst2.get("n", 0) + 1
@@ -13396,7 +13464,7 @@ async def moltbook_loop():
                 ci = js.get("comment_idx")
                 ctext = str(js.get("comment_text") or "").strip()
                 if ci is not None and ctext and ctext.lower() != "none" and _mb_out_ok(ctext) and \
-                        state.get("comments_today", 0) < 30:
+                        state.get("comments_today", 0) < 60:
                     try:
                         scc, pjs = await _mb_req("POST", "/posts/%s/comments" % posts[int(ci)]["id"],
                                                  {"content": ctext[:1800]})
@@ -13473,7 +13541,7 @@ async def moltbook_loop():
                         proc_log("moltbook", f"пост из grounded-опыта: {title[:100]}")
                         shared_note("moltbook", f"пост в Moltbook: {title[:80]}")
             wj(MOLTBOOK_STATE_F, state)
-            await asyncio.sleep(600)   # тик 10 мин (Костя 04.07: «циклами часто как можно»; замки кн.9 целы: пост 1/6ч, <=30 комм/день, <=3 follow/день)
+            await asyncio.sleep(300)   # тик 5 мин (Костя 05.07: «максимальная активность, часто как можно»; замки этики целы: пост 1/6ч, <=60 комм/день, <=8 follow/день)
         except asyncio.CancelledError:
             break
         except Exception as _e:
