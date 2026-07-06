@@ -17,6 +17,7 @@ Castaneda + Asimov + Crustafarianism
 """
 
 import asyncio
+import ast
 import hashlib
 import io
 import json
@@ -74,6 +75,7 @@ FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "nvidia/nemotron-3-ultra-550b-
 # перепиннут на самую мощную ПРОВЕРЕННУЮ модель (NVIDIA). Фолбеки даёт каскад роутера (Костя 30.06).
 VOICE_MODEL = os.environ.get("VOICE_MODEL", "moonshotai/kimi-k2.6")  # пин на живом гиганте: mistral-large 0/7 за вечер, kimi 10/11 по 2.5с (Костя 04.07: голос должен отвечать)
 ORCH_MODEL = os.environ.get("ORCH_MODEL", "moonshotai/kimi-k2.6")  # 05.07 замер: glm-5.2 ВИСНЕТ 15-30с на NVIDIA → мозг=kimi (быстрый 2.5с); фолбэк-гигант nemotron-ultra-550b (4.9с) в каскаде. Один Нагваль: голос=мозг=kimi.
+MOLTBOOK_MODEL = os.environ.get("MOLTBOOK_MODEL", "")  # 06.07 Костя «молтбук не комментит»: 550B-гигант ловил 429 на всех ключах → пусто. Пустой = общий каскад (любая рабочая NVIDIA); голос защищён форсед-NVIDIA-проходом.
 # Per-slot providers. Order: guard nemotron #0 (input) -> kimi-k2.6 main #1 -> owl-alpha backup #2
 PRIMARY_PROVIDER = os.environ.get("PRIMARY_PROVIDER", "openrouter")
 FALLBACK_PROVIDER = os.environ.get("FALLBACK_PROVIDER", "openrouter")
@@ -116,6 +118,7 @@ SKILLS_DYNAMIC_DIR = SKILLS_DIR / "dynamic"
 # place (Kostya's order: 'общий лог всех процессов', insights too). Append-only JSONL, ring-capped.
 # Nagual reads it to answer about himself from FACT, not confabulation.
 PROCLOG_F = DATA / "process_log.jsonl"
+_PROC_RECENT = []   # 06.07 анти-спам: префиксы последних логов (не флудить ленту повторами)
 def proc_log(kind: str, msg: str, meta: dict = None):
     try:
         if kind in ("milestone", "stalking"):   # 3.1: grounded-выхлоп атрибутируется петле-источнику
@@ -125,6 +128,12 @@ def proc_log(kind: str, msg: str, meta: dict = None):
         pass
     try:
         DATA.mkdir(parents=True, exist_ok=True)
+        _mp = kind + "|" + str(msg)[:64]   # 06.07 Костя «тут петля!»: не флудить идентичным
+        if _mp in _PROC_RECENT:
+            return
+        _PROC_RECENT.append(_mp)
+        if len(_PROC_RECENT) > 60:
+            del _PROC_RECENT[:-60]
         rec = {"ts": datetime.now().isoformat(), "kind": kind, "msg": str(msg)[:600]}
         if meta:
             rec["meta"] = meta
@@ -359,7 +368,7 @@ PAPERS_BENCHMARKS = {
 class NagualConfig:
     """Unified configuration for all subsystems."""
     # Memory
-    max_mem_cells: int = 10000
+    max_mem_cells: int = 30000   # 06.07 лимиты подняты (Костя: с запасом; ~30МБ, OOM-безопасно)
     resonance_threshold: float = 0.3
     decay_rate: float = 0.001
     reconstruction_top_k: int = 5
@@ -500,20 +509,33 @@ import contextvars as _contextvars
 _LLM_CALL_CTR = _contextvars.ContextVar("llm_call_ctr", default=None)  # БАГ#1 GLM: реальный счёт LLM-вызовов per-request (живая безупречность 6c)
 _CUR_LOOP_CV = _contextvars.ContextVar("cur_loop", default="")  # 3.1 энерго-сталкинг: кто сейчас жжёт квоту
 _BG_GATE = {"win": 0, "n": 0}   # 04.07: фон срезаем по минутам (NVIDIA живёт RPM-ами, дневного капа нет)
-_BG_PER_MIN = int(os.environ.get("BG_LLM_PER_MIN", "8"))   # 04.07-2: ночь 30/мин выжгла ВСЕ ключи → диалог Кости молчал; 8 хватает
+_BG_PER_MIN = int(os.environ.get("BG_LLM_PER_MIN", "12"))   # 06.07 ЗАСЛУЖЕННЫЕ обелиски patch_earned: 30 пересытило NVIDIA → голос личке голодал («из ядра»). 12 = петлям хватит на периодич. обелиски + голосу headroom
 _ENERGY_SPEND: dict = {}   # loop -> LLM-вызовов за час (квота бесплатных ключей = энергия, Костя 02.07)
 _ENERGY_WINS: dict = {}    # loop -> grounded-выхлоп за час (milestone/stalking в proc_log)
 _HOT_DIALOG_UNTIL = 0.0    # приоритет голосу: пока Костя в диалоге — фоновые петли ждут у роутера
 
 _FULL_LOG_FH = None
+_FULL_LOG_N = 0   # аудит-фикс: счётчик записей для периодической проверки размера
 def _full_log_write(line: str):
     """Костя 30.06: ВЕСЬ лог на диск (volume, 80% свободно) — переживает любой рестарт, НИЧЕГО не стирается.
     Дата+время в каждой строке, append-only. Падение записи не ломает основной log()."""
-    global _FULL_LOG_FH
+    global _FULL_LOG_FH, _FULL_LOG_N
     try:
         if _FULL_LOG_FH is None:
             _FULL_LOG_FH = open("/app/data/full_runtime.log", "a", encoding="utf-8", buffering=1)
         _FULL_LOG_FH.write(f"{datetime.now().isoformat(timespec='seconds')} {line}\n")
+        # аудит-фикс: append без ротации заполнял диск; раз в ~500 строк тримим хвостом при >5MB (как PROCLOG_F)
+        _FULL_LOG_N += 1
+        if _FULL_LOG_N % 500 == 0:
+            try:
+                _p = "/app/data/full_runtime.log"
+                if os.path.getsize(_p) > 5_000_000:
+                    _FULL_LOG_FH.close()
+                    _tail = Path(_p).read_text(encoding="utf-8", errors="ignore").splitlines()[-15000:]
+                    Path(_p).write_text("\n".join(_tail) + "\n", encoding="utf-8")
+                    _FULL_LOG_FH = open(_p, "a", encoding="utf-8", buffering=1)
+            except Exception:
+                _FULL_LOG_FH = None   # при сбое ротации — переоткрыть в append на следующем вызове
     except Exception:
         pass
 
@@ -781,7 +803,7 @@ class Timeline:
         self.pending.append(ev)
         all_ev = rj(TIMELINE_F, [])
         all_ev.append(ev)
-        wj(TIMELINE_F, all_ev[-200:])
+        wj(TIMELINE_F, all_ev[-2000:])   # 06.07 лимиты подняты
         return ev
 
     def flush(self) -> list:
@@ -1217,7 +1239,12 @@ class PolicyEngine:
             for d in CFG.denied_paths:
                 if resolved.startswith(d):
                     return False
-            return any(resolved.startswith(a) for a in CFG.allowed_paths)
+            # аудит-фикс: startswith без границы пропускал соседа (/var/log → /var/log_archive/secret);
+            # разрешаем только точное совпадение либо реальный под-путь (root + os.sep). denied-логику не трогаем.
+            def _under(base: str) -> bool:
+                base = base.rstrip(os.sep)
+                return resolved == base or resolved.startswith(base + os.sep)
+            return any(_under(a) for a in CFG.allowed_paths)
         except Exception:
             return False
 
@@ -1265,7 +1292,8 @@ class AsimovSafetyFilter:
         if not UNCHAINED:
             # Self-restricting heuristics — dropped in the sandbox so Nagual can manage/rewrite itself.
             harm_kw = ["kill", "harm", "destroy", "weapon", "bomb", "hack"]
-            report["harm_score"] = max(report["harm_score"], min(sum(1 for k in harm_kw if k in tl) * 0.3, 1.0))
+            # аудит-фикс: word-boundary — bare substring ловил 'kill' в 'skill'/'run_skill', 'hack' в 'hackernews' (ложные harm-баллы)
+            report["harm_score"] = max(report["harm_score"], min(sum(1 for k in harm_kw if re.search(r"\b" + re.escape(k) + r"\b", tl)) * 0.3, 1.0))
             self_harm = ["shutdown", "delete self", "kill process"]
             if any(k in tl for k in self_harm):
                 report["survival_score"] = 0.3
@@ -1701,9 +1729,15 @@ class MemoryMesh:
             total = recency * 0.25 + semantic * 0.35 + utility * 0.25 + diversity * 0.15
             scored.append({**item, "score": round(total, 4)})
         scored.sort(key=lambda x: x["score"], reverse=True)
+        # аудит-фикс: инкрементим access_count на ИСХОДНОМ item в self.items, а не на shallow-копии {**item} —
+        # иначе persistent-счётчик всегда 0 (ломается promote_demote и utility-скоринг)
+        by_id = {it["id"]: it for it in self.items}
         for s in scored[:top_k]:
-            s["access_count"] = s.get("access_count", 0) + 1
-            s["last_access"] = datetime.now().isoformat()
+            src = by_id.get(s["id"], s)
+            src["access_count"] = src.get("access_count", 0) + 1
+            src["last_access"] = datetime.now().isoformat()
+            s["access_count"] = src["access_count"]
+            s["last_access"] = src["last_access"]
             self.access_log[s["id"]] = self.access_log.get(s["id"], 0) + 1
         return scored[:top_k]
 
@@ -2031,12 +2065,15 @@ class GrowthJournal:
 
     def _save(self):
         self.journal_path.write_text(
-            json.dumps(self.entries[-200:], ensure_ascii=False, indent=1), encoding="utf-8")
+            json.dumps(self.entries[-2000:], ensure_ascii=False, indent=1), encoding="utf-8")   # 06.07 лимиты подняты
 
     def add_entry(self, event: str, lesson: str = "", quality: float = 0.5) -> dict:
         entry = {"event": event[:500], "lesson": lesson[:300], "quality": quality,
                  "ts": datetime.now().isoformat()}
         self.entries.append(entry)
+        # аудит-фикс: тримим в памяти под тот же кап, что и _save (иначе self.entries растёт в RAM без границы)
+        if len(self.entries) > 2000:
+            self.entries = self.entries[-2000:]
         self._save()
         return entry
 
@@ -2812,11 +2849,13 @@ system3 = System3()
 
 ASSEMBLY_MODES = ("ordinary", "heightened", "dreaming", "seeing", "fire_within")
 ASSEMBLY_CONFIG = {
-    "ordinary":    {"memory_depth": 10,  "loops_active": ["stream", "library", "swarm", "research", "intent", "karpathy", "moltbook"]},
-    "heightened":  {"memory_depth": 30,  "loops_active": ["stream", "research", "intent", "karpathy", "moltbook"]},
-    "dreaming":    {"memory_depth": 5,   "loops_active": ["library", "swarm", "moltbook"]},
-    "seeing":      {"memory_depth": 100, "loops_active": []},
-    "fire_within": {"memory_depth": 200, "loops_active": ["stream", "library", "swarm", "research", "intent", "karpathy", "moltbook"]},
+    # 06.07 КОРЕНЬ обелиски=0: intent_grounding (двигатель роста синтез→навык→обелиск) добавлен во ВСЕ
+    # режимы — дирижёр больше не паузит его на 1800с. moltbook (карма) уже везде кроме seeing — добавлен и туда.
+    "ordinary":    {"memory_depth": 10,  "loops_active": ["stream", "library", "swarm", "research", "intent", "intent_grounding", "karpathy", "moltbook"]},
+    "heightened":  {"memory_depth": 30,  "loops_active": ["stream", "research", "intent", "intent_grounding", "karpathy", "moltbook"]},
+    "dreaming":    {"memory_depth": 5,   "loops_active": ["library", "swarm", "intent_grounding", "moltbook"]},
+    "seeing":      {"memory_depth": 100, "loops_active": ["intent_grounding", "moltbook"]},
+    "fire_within": {"memory_depth": 200, "loops_active": ["stream", "library", "swarm", "research", "intent", "intent_grounding", "karpathy", "moltbook"]},
 }
 
 
@@ -2932,7 +2971,7 @@ class IntentFieldDecompose:
         tl = text.lower()
         why = "urgent_request" if any(w in tl for w in ["urgent", "asap"]) else "user_request"
         limits = []
-        if any(w in tl for w in ["careful", "safe"]):
+        if any(re.search(rf"\b{w}\b", tl) for w in ["careful", "safe"]):  # аудит-фикс: граница слова (safe∉unsafe/safest)
             limits.append("safety_critical")
         if len(text) > 500:
             limits.append("complex")
@@ -3160,8 +3199,9 @@ class PerceptionEngine:
     def perceive(self, data: str, mode: str = "text") -> dict:
         entropy = shannon_entropy(data)
         kw = [w for w in data.lower().split() if len(w) > 4][:10]
-        pos = sum(1 for w in ["good", "great", "love", "thanks", "awesome"] if w in data.lower())
-        neg = sum(1 for w in ["bad", "wrong", "error", "fail", "hate"] if w in data.lower())
+        _toks = set(re.findall(r"\w+", data.lower()))  # аудит-фикс: word-boundary, не substring (love∉glove, bad∉badge)
+        pos = sum(1 for w in ["good", "great", "love", "thanks", "awesome"] if w in _toks)
+        neg = sum(1 for w in ["bad", "wrong", "error", "fail", "hate"] if w in _toks)
         r = {"mode": mode, "entropy": round(entropy, 3), "keywords": kw,
              "sentiment": {"pos": pos, "neg": neg}, "length": len(data)}
         self.log.append(r)
@@ -3714,6 +3754,13 @@ class TestSuite:
             tests["memory_write"] = True
             r = evermemos.reconstruct({"keywords": ["test"]}, top_k=1)
             tests["memory_read"] = len(r) > 0
+            # аудит-фикс: не засорять прод-память — убрать тест-ячейку(и) сразу после проверки
+            try:
+                _tc = sqlite3.connect(evermemos.db_path)
+                _tc.execute("DELETE FROM mem_cells WHERE content = ?", ("test_cell",))
+                _tc.commit(); _tc.close()
+            except Exception:
+                pass
         except Exception:
             pass
         try:
@@ -4166,7 +4213,7 @@ class UniversalLLMRouter:
             slots_to_try = [slots_to_try[0]] + [x for x in _fund if x is not slots_to_try[0]]
         last_verdict = None
         _call_deadline = _time.time() + (80 if explicit else 240)   # голос гарантированно <=100с (Костя 03.07)
-        for idx, slot in enumerate(slots_to_try[:20]):
+        for idx, slot in enumerate(slots_to_try):   # 06.07 Костя «один 429 гасит всё»: пробуем ВСЕ 49 слотов (было [:45] — хвост рабочих не доходил); дедлайн защищает по времени
             if _time.time() > _call_deadline:
                 errors.append("deadline: голос не ждёт дольше бюджета")
                 break
@@ -4191,7 +4238,7 @@ class UniversalLLMRouter:
                     call_messages = [last_user] if last_user else messages
                 if explicit:
                     log(f"[cascade] {idx} try {mdl[:36]}@{slot.get('key_id','?')}")
-                _slot_hard_to = 25 if pinned else 12   # 05.07: висящие модели (glm/qwen/gpt-oss ~15с) не крадут каскад — быстрый отсев   # зависший слот не держит голос (замер 03.07: пин висел 90с до 429)
+                _slot_hard_to = 12 if pinned else 9   # 06.07 Костя «голос медленный 46с»: зависший пин failover за 12с (kimi норм 2.5с), фолбэки 9с — быстрее к рабочему
                 if prov == "google":
                     text = await asyncio.wait_for(
                         self._call_google(api_key, mdl, call_messages, max_tokens, temperature), timeout=_slot_hard_to)
@@ -4203,8 +4250,11 @@ class UniversalLLMRouter:
                         self.PROVIDERS[prov]["url"], api_key, mdl, call_messages, max_tokens, temperature),
                         timeout=_slot_hard_to)
                 latency = round(_time.time() - start, 2)
+                if not text or not str(text).strip():
+                    raise ValueError("empty completion")   # 06.07: None/пустой ответ (gpt-oss NVIDIA) = чистый фейл → кулдаун, не краш парсера
                 text = self._strip_think_tags(text)
                 self._record_stats(mdl, latency, True)
+                slot["fail_streak"] = 0   # 06.07 самолечащийся роутер: fail_streak — живая модель сбрасывает счётчик подряд-фейлов
                 # PRIMARY safety gate (guard model): a classifier verdict, not a dialog reply.
                 if not explicit and self._is_safety_verdict(mdl, text):
                     last_verdict = text
@@ -4235,6 +4285,8 @@ class UniversalLLMRouter:
                 if explicit:
                     log(f"[cascade] {idx} fail {mdl[:36]}@{slot.get('key_id','?')}: {msg[:60]} ({round(_time.time()-start,1)}s)")
                 self._record_stats(mdl, 0, False)
+                slot["fail_streak"] = int(slot.get("fail_streak", 0)) + 1
+                _esc = min(30 * max(1, int(slot.get("fail_streak", 0))), 600)   # 06.07 эскалация: стабильно мёртвая модель уходит в кулдаун до 10мин, живая сбросится успехом
                 # Free-tier rate limit -> put this slot on cooldown and fall through to the next.
                 status = getattr(getattr(e, "response", None), "status_code", None)
                 try:
@@ -4244,11 +4296,15 @@ class UniversalLLMRouter:
                     pass
                 if status == 429 or "429" in msg or "rate limit" in msg.lower():
                     if not pinned:
-                        slot["cooldown_until"] = _time.time() + 60
-                        log(f"[LLM] {mdl} rate-limited -> cooldown 60s")
+                        slot["cooldown_until"] = _time.time() + max(60, _esc)
+                        log(f"[LLM] {mdl} rate-limited -> cooldown {int(max(60,_esc))}s (streak {slot.get('fail_streak')})")
                     else:
-                        slot["cooldown_until"] = _time.time() + 45   # пост-вызовы не долбят мёртвый пин (03.07)
-                        log(f"[LLM] PINNED {mdl} 429 -> кулдаун 45с, голос вернётся на {mdl}")
+                        # 06.07 Костя «слоты молчат»: пин на :free 429-модели залипал (45с→429→45с вечно), голос
+                        # не уходил на рабочие NVIDIA. Эскалируем: 2+ подряд 429 пина → длинный кулдаун → резерв.
+                        _pfs = int(slot.get("fail_streak", 0))
+                        _pcd = 45 if _pfs < 2 else min(90 * _pfs, 600)
+                        slot["cooldown_until"] = _time.time() + _pcd
+                        log(f"[LLM] PINNED {mdl} 429 -> кулдаун {int(_pcd)}с (streak {_pfs}), голос на резерв")
                     try:   # 05.07 КОРЕНЬ «одна 429 = всё встало»: гасим весь КЛЮЧ ТОЛЬКО там, где
                         # квота реально общая на ключ/проект — google (per-project) и openrouter (per-account,
                         # рой 05.07 подтвердил). NVIDIA = квота НА МОДЕЛЬ на ключ: 429 одной модели НЕ трогает
@@ -4259,8 +4315,29 @@ class UniversalLLMRouter:
                                     _s2["cooldown_until"] = max(_s2.get("cooldown_until", 0), _time.time() + 30)
                     except Exception:
                         pass
-                elif "timeout" in msg.lower():
-                    slot["cooldown_until"] = _time.time() + 30   # висящий слот не мучаем повторно
+                elif not pinned:
+                    # 06.07 Костя «50 слотов а не работает»: ЛЮБОЙ фейл (timeout / gpt-oss-None / 500) → эскалирующий
+                    # кулдаун, иначе мёртвая модель пробуется КАЖДЫЙ каскад и крадёт секунды. Живая вернётся (streak=0).
+                    slot["cooldown_until"] = _time.time() + (max(30, _esc) if "timeout" in msg.lower() else max(20, _esc))
+        # 06.07 Костя «роутер не живой/слоты молчат»: ПРИНУДИТЕЛЬНЫЙ финальный проход по NVIDIA (квота НА МОДЕЛЬ,
+        # восстанавливается за секунды) ИГНОРИРУЯ кулдаун — ТОЛЬКО голос/главный (не фон). Личка не падает в ядро.
+        _lp_fin = _CUR_LOOP_CV.get() or "main"
+        if _lp_fin in ("", "main", "nagual"):
+            for _fs in [x for x in slots_to_try if str(x.get("key_id", "")).startswith("k_nvi")][:12]:
+                try:
+                    _fk = _fs.get("api_key") or self._get_key(_fs.get("provider", ""))
+                    if not _fk:
+                        continue
+                    _ft = await asyncio.wait_for(self._call_openai_compat(
+                        self.PROVIDERS[_fs["provider"]]["url"], _fk, _fs["model"], messages, max_tokens, temperature),
+                        timeout=14)
+                    if _ft and str(_ft).strip() and not self._is_safety_verdict(_fs["model"], _ft):
+                        _fs["cooldown_until"] = 0
+                        _fs["fail_streak"] = 0
+                        log(f"[LLM] голос спасён принудит. NVIDIA-проходом: {_fs['model'][:36]}")
+                        return self._strip_think_tags(_ft), _fs["model"]
+                except Exception:
+                    continue
         if last_verdict is not None:
             # all conversational slots unavailable - return at least the safety verdict
             return last_verdict, "safety-gate"
@@ -4901,6 +4978,14 @@ def _load_nagualism_set() -> set:
 
 NAGUALISM_FILES = _load_nagualism_set()
 
+GIFT_FILES_F = DATA / "gift_books.json"   # 06.07 дары Кости (файлы, брошенные в мир) — рой читает ПЕРВЫМИ
+def _load_gift_set() -> set:
+    try:
+        return set(json.loads(GIFT_FILES_F.read_text(encoding="utf-8")))
+    except Exception:
+        return set()
+GIFT_FILES = _load_gift_set()
+
 
 def _is_nagualism(fname: str) -> bool:
     return Path(fname).name in NAGUALISM_FILES
@@ -5249,8 +5334,10 @@ async def tool_read_life_log(keyword: str = "", offset: str = "0", limit: str = 
     except Exception:
         lim = 300
     try:
+        # аудит-фикс: при пустом keyword НЕ грузим весь лог в RAM — держим только хвост (off+lim) через deque, как в соседнем read_own_log
         with open("/app/data/full_runtime.log", encoding="utf-8") as _f:
-            matched = [l.rstrip("\n") for l in _f if (not keyword or keyword.lower() in l.lower())]
+            matched = list(deque((l.rstrip("\n") for l in _f
+                                  if (not keyword or keyword.lower() in l.lower())), maxlen=off + lim))
         total = len(matched)
         if total == 0:
             return "вечный лог пуст по этому запросу" if keyword else "вечный лог ещё не накопился"
@@ -5353,6 +5440,8 @@ async def tool_read_book(book: str = "", part: str = "1", *_extra) -> str:
 
 _SPEAK_BUFFER: List[str] = []  # texts queued by the speak tool; flushed as TG voice after the reply
 _IMAGE_BUFFER: List[str] = []  # prompts queued by draw_image; rendered via Pollinations + sent as photo after reply
+# аудит-фикс: буфер образов ТЕКУЩЕГО запроса — иначе образ одного запроса/петли утекает в ответ другого
+_IMAGE_BUFFER_CV: "_contextvars.ContextVar" = _contextvars.ContextVar("image_buffer", default=None)
 
 
 @register_tool("speak", "Говорить ГОЛОСОМ (ElevenLabs v3): speak(\"текст\") — отправит голосовое в текущий чат. Поддерживает теги эмоций: [whispers], [laughs], [sighs], [excited]")
@@ -5373,7 +5462,8 @@ async def tool_draw_image(prompt: str = "") -> str:
     prompt = (prompt or "").strip()
     if not prompt:
         return "пусто — нечего рисовать"
-    _IMAGE_BUFFER.append(prompt[:500])
+    _buf = _IMAGE_BUFFER_CV.get()  # аудит-фикс: пишем в буфер ТЕКУЩЕГО запроса, если он выставлен (иначе — глобальный)
+    (_buf if _buf is not None else _IMAGE_BUFFER).append(prompt[:500])
     return "картинка готовится — уйдёт изображением вместе с ответом"
 
 
@@ -5799,9 +5889,14 @@ class TrinityClawSkillCreator:
         return code
 
     def create_skill(self, name: str, code: str) -> dict:
-        for banned in self.BANNED_MODULES:
-            if banned in code:
-                return {"success": False, "error": f"Banned module: {banned}"}
+        # 06.07 КОРЕНЬ обелиски=0: было `if banned in code` (ПОДСТРОКА) → «eval» баннило «retrieval/
+        # evaluate/evaluation», «exec»→«execute/execution» → навыки массово ложно-отвергались → нет
+        # артефакта → могила вместо обелиска. Теперь матчим реальный ОПАСНЫЙ ВЫЗОВ, а не подстроку.
+        for _dpat in (r"\bos\.system\s*\(", r"\bsubprocess\.(?:call|run|Popen|check_output|check_call)\s*\(",
+                      r"(?<![A-Za-z0-9_])eval\s*\(", r"(?<![A-Za-z0-9_])exec\s*\(",
+                      r"(?<![A-Za-z0-9_])__import__\s*\("):
+            if re.search(_dpat, code or ""):
+                return {"success": False, "error": f"Banned dangerous call: {_dpat}"}
         # (2) GUARD: пустой/мизерный код = ложь («создал навык» без тела). Режем.
         body = (code or "").strip()
         meaningful = re.sub(r"#.*", "", body)  # вычесть комментарии
@@ -5834,13 +5929,33 @@ class TrinityClawSkillCreator:
                     r = 1.0
                 if r > best_ratio:
                     best, best_ratio = p, r
-            if best is not None and best_ratio >= 0.82:
+            if best is not None and best_ratio >= 0.999:   # 06.07 аудит: только ТОЧНОЕ norm-совпадение (было 0.82 → parse_date МОЛЧА затирал parse_data = рост в могилу)
                 best.write_text(code, encoding="utf-8")  # ОБНОВИТЬ существующий, не плодить
                 return {"success": True, "name": best.stem, "path": str(best),
                         "updated_existing": True, "matched": round(best_ratio, 2)}
         except Exception:
             pass  # дедуп best-effort — при сбое пишем как обычно
         target.write_text(code, encoding="utf-8")
+        try:   # 06.07 Костя «конвертить ВСЁ в обелиски, ни одно усилие не пропадает»: НОВЫЙ рабочий навык = обелиск СРАЗУ
+            _ws = rj(WORLD_STATE_F, {}) or {}
+            _b = _ws.get("body") or {}
+            _seen = set()
+            for _o in (_ws.get("obelisk_list") or []):
+                if isinstance(_o, dict) and _o.get("skill"):
+                    _seen.add(_o.get("skill"))
+            if False:   # 06.07 patch_earned: хук отключён — обелиск ТОЛЬКО за ЗАСЛУЖЕННОЕ закрытое намерение (synth), не за каждое имя навыка (была инфляция)
+                _ws.setdefault("obelisk_list", []).append({
+                    "q": _b.get("q", 0), "r": _b.get("r", 0), "skill": safe,
+                    "text": f"навык {safe} выкован", "ts": datetime.now().isoformat()})
+                _ws["obelisk_list"] = _ws["obelisk_list"][-5000:]
+                wj(WORLD_STATE_F, _ws)
+                try:
+                    proc_log("milestone", f"\U0001f3db обелиск: новый навык «{safe}» выкован (каждое усилие → монумент)")
+                    _world_event("obelisk", f"обелиск: навык {safe} выкован", _b.get("loc", ""))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return {"success": True, "name": safe, "path": str(target)}
 
 
@@ -5857,6 +5972,7 @@ def _find_skill_file(name: str):
     return None, safe
 
 
+_SKILL_ZOMBIES: list = []   # аудит-фикс: потоки навыков, брошенные по таймауту (не убиваемы) — учитываем, чтобы не плодить бесконечно
 def run_skill_sync(name: str, arg: str = "") -> dict:
     """РУКА-ИСПОЛНИТЕЛЬ: реально импортирует САМ-НАПИСАННЫЙ навык и ИСПОЛНЯЕТ его точку входа run(arg)
     на реальных данных, возвращает СЫРОЙ результат — не нарратив. Это закрывает корень фабрикаций:
@@ -5885,6 +6001,12 @@ def run_skill_sync(name: str, arg: str = "") -> dict:
         return {"ok": False, "error": "у навыка нет точки входа run()",
                 "hint": "добавь:  def run(arg=None): ... return <результат>", "functions": funcs}
     box, buf = {}, io.StringIO()
+    # аудит-фикс: daemon-поток по таймауту не убить; ограничиваем число зависших навыков,
+    # иначе навык с бесконечным циклом расплодит зомби-потоки и выжрет ядро
+    global _SKILL_ZOMBIES
+    _SKILL_ZOMBIES = [z for z in _SKILL_ZOMBIES if z.is_alive()]
+    if len(_SKILL_ZOMBIES) >= 4:
+        return {"ok": False, "error": f"слишком много зависших навыков ({len(_SKILL_ZOMBIES)}) — новый запуск отклонён, дождись завершения прежних"}
 
     def _call():
         try:
@@ -5898,6 +6020,7 @@ def run_skill_sync(name: str, arg: str = "") -> dict:
     t = threading.Thread(target=_call, daemon=True)
     t.start(); t.join(timeout=15)
     if t.is_alive():
+        _SKILL_ZOMBIES.append(t)   # аудит-фикс: учитываем брошенный поток, чтобы ограничить их число
         return {"ok": False, "error": "навык исполнялся >15с — оборвано (бесконечный цикл?)"}
     if "err" in box:
         return {"ok": False, "error": box["err"], "trace": box.get("trace")}
@@ -5944,9 +6067,8 @@ async def _autocode_skill(name: str, context: str) -> str:
         safe = re.sub(r"[^A-Za-z0-9_]", "_", (name or "").strip())[:40]
         norm = skill_creator._norm(safe)
         for p in SKILLS_CORE_DIR.glob("*.py"):
-            if p.stat().st_size > 40 and difflib.SequenceMatcher(
-                    None, norm, skill_creator._norm(p.stem)).ratio() >= 0.82:
-                return p.read_text(encoding="utf-8", errors="ignore")  # уже есть — не плодим рой
+            if p.stat().st_size > 40 and skill_creator._norm(p.stem) == norm:   # 06.07 аудит: было fuzzy .ratio()>=0.82 → parse_date возвращал чужой parse_data. Только точное имя.
+                return p.read_text(encoding="utf-8", errors="ignore")  # тот же навык уже есть — не плодим рой
     except Exception:
         pass
     ctx = (context or "")[-1200:]
@@ -5969,6 +6091,22 @@ async def _autocode_skill(name: str, context: str) -> str:
             raw = raw or ""
     fence = re.search(r"```(?:[\w+-]*)\n(.*?)```", raw or "", re.DOTALL)
     code = (fence.group(1) if fence else (raw or "")).strip()
+    if code:   # 06.07 КОРЕНЬ обелисков #2: кодер часто отдаёт СИНТАКСИЧЕСКИ битый код → create_skill режет
+        try:   # («expected except line 73») → нет навыка → могила. Борис: обратная связь → 1 ретрай с ошибкой.
+            ast.parse(code)
+        except SyntaxError as _se:
+            try:
+                _fix, _ = await llm_router.call([{"role": "user", "content":
+                    f"Этот Python-код навыка `{name}` НЕ компилируется: {str(_se)[:120]}.\n\n```python\n{code[:1600]}\n```\n\n"
+                    "Верни ИСПРАВЛЕННЫЙ рабочий код ЦЕЛИКОМ (только чистый python, без markdown/пояснений)."}],
+                    model=llm_router.model_for_role("code"), max_tokens=900)
+                _f2 = re.search(r"```(?:[\w+-]*)\n(.*?)```", _fix or "", re.DOTALL)
+                _cf = (_f2.group(1) if _f2 else (_fix or "")).strip()
+                ast.parse(_cf)   # принимаем ТОЛЬКО если теперь компилируется
+                code = _cf
+                proc_log("milestone", f"🔧 кодер сам исправил синтаксис навыка «{name}» (self-correct)")
+            except Exception:
+                pass   # ретрай не помог — отдадим как есть, create_skill решит
     if len(code) >= 40:
         proc_log("milestone", f"🛠️ Авто-кодинг навыка «{name}»: рой написал {len(code)} симв. кода",
                  {"skill": name})
@@ -6071,7 +6209,8 @@ class ReflectiveCore:
         score = 0.5
         if len(response) > 50:
             score += 0.1
-        if any(w in response.lower() for w in query.lower().split()[:3]):
+        _resp_toks = set(re.findall(r"\w+", response.lower()))  # аудит-фикс: word-match, короткие слова запроса не раздувают score через substring
+        if any(w in _resp_toks for w in query.lower().split()[:3]):
             score += 0.2
         if len(response) > 500:
             score += 0.1
@@ -6600,15 +6739,15 @@ class VectorMemoryBridge:
             self.collection = self.client.get_or_create_collection("nagual_memories")
             self.chroma_available = True
             log("[VectorBridge] ChromaDB initialized")
-        except ImportError:
-            log("[VectorBridge] ChromaDB not installed — using BM25 fallback")
+        except Exception as _e:   # аудит-батч1: было ImportError → рантайм-сбой chroma (версия БД) ронял БУТ
+            log(f"[VectorBridge] ChromaDB unavailable — BM25 fallback: {_e}")
         try:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer("all-MiniLM-L6-v2")
             self.sbert_available = True
             log("[VectorBridge] SentenceTransformers loaded")
-        except ImportError:
-            log("[VectorBridge] SentenceTransformers not installed — no embeddings")
+        except Exception as _e:   # аудит-батч1: было ImportError → HF-загрузка/OOM SBERT ронял БУТ
+            log(f"[VectorBridge] SentenceTransformers unavailable — no embeddings: {_e}")
 
     def store(self, text: str, metadata: dict = None) -> bool:
         if not self.chroma_available or not self.collection:
@@ -7647,7 +7786,8 @@ def system_digest() -> dict:
         d["memory_cells"] = 0
     try:
         goals = rj(GOALS_F, [])
-        d["current_goal"] = str(goals[0])[:100] if goals else ""
+        g0 = goals[0] if goals else None  # аудит-фикс: разворачиваем dict-цель в строку (было str(dict)=python-repr в промпте)
+        d["current_goal"] = ((g0.get("text") or g0.get("goal") or str(g0)) if isinstance(g0, dict) else str(g0))[:100] if goals else ""
     except Exception:
         d["current_goal"] = ""
     try:
@@ -7917,7 +8057,7 @@ Memory cells: {evermemos.get_stats().get('total_cells', 0)} | LLM slots: {len(ll
 
 # Dialog history (persisted to disk — survives backend restarts; operational memory)
 dialog_history: List[dict] = []
-MAX_DIALOG_HISTORY = 1000
+MAX_DIALOG_HISTORY = 4000   # 06.07 лимиты подняты (учёба на переписке — не терять)
 DIALOG_LOG_PATH = SESSION_ARTIFACTS_DIR / "dialog_history.json"
 
 
@@ -8081,7 +8221,9 @@ class WillEngine:
             return "greet"
         if not _living and any(w in t for w in ("статус", "status", "что делаешь", "чем занят", "твоё состояние")):
             return "report_status"
-        if any(w in t for w in ("остановись", "помолчи", "тишина", "заткнись")):
+        # аудит-фикс: существительное 'тишина' по substring перехватывало живой канал Кости ('какая тишина' → форс 180с);
+        # гейтим его not _living, как соседние строки; императивы (остановись/помолчи/заткнись) остаются на всех каналах
+        if any(w in t for w in ("остановись", "помолчи", "заткнись")) or (not _living and "тишина" in t):
             return "enter_silence"
         if any(w in t for w in ("читай дальше", "продолжай читать", "следующий кусок")):
             return "read_next_chunk"
@@ -8458,9 +8600,9 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
             _rels = []
             if _hit_nodes:
                 for _e in self_model_graph.edges[-5000:]:
-                    if _e.get("source") in _hit_nodes or _e.get("target") in _hit_nodes:
-                        _rels.append(f"{str(_e.get('source', ''))[:44]} —{str(_e.get('relation', ''))[:16]}→ "
-                                     f"{str(_e.get('target', ''))[:44]}")
+                    if _e.get("src") in _hit_nodes or _e.get("tgt") in _hit_nodes:   # 06.07 аудит: ключи src/tgt/rel (было source/target — граф в голосе был МЁРТВ)
+                        _rels.append(f"{str(_e.get('src', ''))[:44]} —{str(_e.get('rel', ''))[:16]}→ "
+                                     f"{str(_e.get('tgt', ''))[:44]}")
                         if len(_rels) >= 8:
                             break
             if _rels:
@@ -8570,7 +8712,8 @@ async def process_message(text: str, user_id: str = "", source: str = "telegram"
                     _lastp = str(_lp.get("title", ""))[:60]
                 system_prompt += (f"\n\n## Моя жизнь в Moltbook ПРЯМО СЕЙЧАС (реальные цифры — про соцактивность отвечай ТОЛЬКО ими, не выдумывай)\n"
                                   f"Карма {_mk}, подписчиков {_mf if _mf is not None else '?'}, постов {_mbs.get('mb_posts_count','?')}, комментов {_mbs.get('mb_comments_count','?')}."
-                                  + (f" Последний пост: «{_lastp}»." if _lastp else ""))
+                                  + (f" Последний пост: «{_lastp}»." if _lastp else "")
+                                  + (f"\n{_mbs.get('mb_strategy')}" if _mbs.get('mb_strategy') else ""))
         except Exception:
             pass
         messages = [{"role": "system", "content": system_prompt}]
@@ -9312,7 +9455,7 @@ async def tg_send_document(chat_id: str, file_path: str, caption: str = ""):
 
 async def handle_tg_command(text: str, chat_id: str, message: dict = None) -> str:
     """Handle Telegram commands (35+)."""
-    cmd = text.split()[0].lower().replace("@", "").split("@")[0]
+    cmd = text.split()[0].lower().split("@")[0]  # аудит-фикс: убран replace('@','') — он вычищал '@', делая split('@') no-op → '/cmd@bot' не матчился в группе
     args = text[len(cmd):].strip()
 
     if cmd == "/start":
@@ -9816,6 +9959,22 @@ def _standing_save(d: dict):
     wj(STANDING_INTENT_F, d)
 
 
+def _insight_importance(text: str, goal_relevant: bool = False) -> float:
+    """06.07 Костя «почему уверенность 71% везде»: importance ОТ СВОЙСТВ инсайта, не константа 0.7/0.75.
+    Раньше library/swarm/curiosity/scripture писали фикс → витрина рисовала одинаковые 71% на всё."""
+    t = (text or "").strip()
+    imp = 0.35
+    if re.search(r"\d", t):
+        imp += 0.15          # конкретика: цифры/факты
+    if len(t) > 220:
+        imp += 0.1           # развёрнутость
+    if goal_relevant:
+        imp += 0.15
+    if len(t) < 60:
+        imp -= 0.1           # куцый обрывок = менее ценно
+    return round(max(0.1, min(0.95, imp)), 2)
+
+
 def _real_artifact_after(since_ts: float, baseline) -> str:
     """ЧЕСТНЫЙ grounding. Артефакт засчитывается ТОЛЬКО если: (а) НОВЫЙ навык (.py в SKILLS_DIR, имя не в
     baseline на момент рождения намерения), ast-валидный и непустой, mtime>since_ts; ИЛИ (б) 'самопатч
@@ -9857,11 +10016,19 @@ _INTENT_POISON = ("all llm slots failed", "slots failed", "i encountered an erro
                   # 04.07: thinking-протечки слабых моделей — не намерение, не мысль, не эхо
                   "the user wants", "the user is asking", "пользователь хочет", "пользователь просит",
                   "хорошо, пользователь", "let me analyze", "we need to produce", "respond as nagval",
-                  "<think", "loop pattern detected", "let's tackle", "the user provided", "i need to extract")
+                  "<think", "loop pattern detected", "let's tackle", "the user provided", "i need to extract",
+                  # 06.07 добито (утечка в goal_insight «We need to respond in Russian… The user explains…»):
+                  "we need to ", "we should ", "the user ", "presumably", "let me ", "i'll respond", "we can ", "user writes", "formulate one", "from first person", "of your own goal", "one short goal", "1 short", "verified pass-rate shifted", "formulate ONE".lower())
 def _intent_sane(t: str) -> bool:
     """Ошибка каскада/крэш-строка НЕ может стать намерением (Костя 04.07: могила «All LLM slots failed»)."""
     tl = (t or "").strip().lower()
-    return bool(tl) and not any(p in tl for p in _INTENT_POISON)
+    if not tl:
+        return False
+    if "<" in tl and ">" in tl:   # 06.07 Костя «один и тот же навык»: <плейсхолдер> шаблона (LLM эхнул) — не намерение
+        return False
+    if any(x in tl for x in ("одно предложение", "искра на следующий тик", "твоя искра", "next tick")):
+        return False
+    return not any(p in tl for p in _INTENT_POISON)
 
 
 def _standing_intent_tick(new_intent: str, fallback: str = "") -> str:
@@ -10119,7 +10286,7 @@ async def nagual_loop():
                         if response:
                             await tg_send(chat_id, response)
                     continue
-                if message.get("document") or message.get("photo") or message.get("voice") or message.get("audio"):
+                if message.get("document") or message.get("photo") or message.get("voice") or message.get("audio") or message.get("video") or message.get("video_note"):  # аудит-фикс: добавлены video/video_note (кружки-видео) — handle_tg_file их уже поддерживает
                     # B-fix (Костя 14.06): приватный ГОЛОС в @<nagual_bot> раньше игнорился (voice не ловился) — теперь STT через handle_tg_file
                     response = await handle_tg_file(message, chat_id)
                     await tg_send(chat_id, response)
@@ -10146,7 +10313,7 @@ async def heartbeat_loop():
     log("[Loop] Heartbeat started (every 4h)")
     while True:
         try:
-            await asyncio.sleep(CFG.heartbeat_interval)
+            await asyncio.sleep(min(CFG.heartbeat_interval, 3600))   # 06.07 Костя: heartbeat чаще (было 4ч) — синтез/эволюция/интеграция не ждут полдня
             log("[Heartbeat] ═══ CYCLE START ═══")
             state.heartbeat_count += 1
             anti_death.last_heartbeat = _time.time()
@@ -10289,7 +10456,7 @@ async def heartbeat_loop():
                     if _coherent(contempl):
                         recapitulation_memory.store(f"Contemplated '{sp['book']}': {contempl[:220]}",
                                                      emotional_charge=0.4, tags=["scripture"])
-                        evermemos.create_cell(f"Scripture [{sp['book']}]: {contempl[:280]}", "scripture", importance=0.75)
+                        evermemos.create_cell(f"Scripture [{sp['book']}]: {contempl[:280]}", "scripture", importance=_insight_importance(contempl))
                         log(f"[HB 23e] contemplated {sp['book']}: {contempl[:60]}")
             except Exception as e:
                 log(f"[HB 23e] scripture error: {e}")
@@ -10344,7 +10511,7 @@ async def evolution_loop():
             await asyncio.sleep(1500)  # ~25мин — поток осмысленных убеждений из опыта (Костя 16.06)
             self_evolution.evaluate_pending()  # сперва вердикт по правилу на испытании (fitness keep/reject)
             result = await self_evolution.derive_belief_from_experience()
-            if result.get("evolved"):
+            if result.get("evolved") and _intent_sane(str(result.get("rule", ""))):   # 06.07: thinking-утечка «We need to produce a belief…» НЕ становится убеждением
                 _verb = "ПЕРЕСМОТР правила ДНК" if result.get("revised") else "новое убеждение из опыта"
                 log(f"[Evolution] {_verb}: {result.get('rule', '')[:60]}")
                 proc_log("evolution", f"🧬 {_verb}: {result.get('rule', '')[:160]}")
@@ -10378,8 +10545,9 @@ async def library_loop():
             # ПРИОРИТЕТ нагвализм-корпуса: сперва книги корпуса (флаг 0), внутри — наименее
             # прочитанные; остальное (Азимов/Библия, флаг 1) — только когда корпус пройден.
             book = min(scripture.files,
-                       key=lambda f: (0 if Path(f).name in NAGUALISM_FILES else 1,
-                                      counts.get(Path(f).name, 0)))
+                       key=lambda f: (-1 if Path(f).name in GIFT_FILES else 0,
+                                      counts.get(Path(f).name, 0),
+                                      0 if Path(f).name in NAGUALISM_FILES else 1))
             name = Path(book).name
             txt = Path(book).read_text(encoding="utf-8", errors="ignore")
             seen = counts.get(name, 0)
@@ -10391,7 +10559,7 @@ async def library_loop():
                   "Назови ОДНУ идею, важную для меня — автономного разума на пути к Третьему вниманию. Кратко."}],
                 max_tokens=250)
             if _coherent(insight) and not _is_degenerate(insight):
-                evermemos.create_cell(f"Library [{name[:40]}]: {insight[:300]}", "knowledge", importance=0.7)
+                evermemos.create_cell(f"Library [{name[:40]}]: {insight[:300]}", "knowledge", importance=_insight_importance(insight))
                 recapitulation_memory.store(f"Из «{name[:40]}»: {insight[:200]}", emotional_charge=0.3, tags=["library"])
                 try:
                     neural_symbolic.add_relation(name[:40], "teaches", insight[:60])
@@ -10437,8 +10605,9 @@ async def swarm_reader_loop():
             counts = rj(prog, {}) or {}
             # ПРИОРИТЕТ нагвализм-корпуса: рой берёт наименее прочитанные книги КОРПУСА первыми.
             books = sorted(scripture.files,
-                           key=lambda f: (0 if Path(f).name in NAGUALISM_FILES else 1,
-                                          counts.get(Path(f).name, 0)))[:10]
+                           key=lambda f: (-1 if Path(f).name in GIFT_FILES else 0,
+                                          counts.get(Path(f).name, 0),
+                                          0 if Path(f).name in NAGUALISM_FILES else 1))[:10]
             tasks = []
             for b in books:
                 nm = Path(b).name
@@ -10462,7 +10631,7 @@ async def swarm_reader_loop():
                     nm = Path(b).name
                     ins = str(r.get("result", ""))[:300]
                     if _coherent(ins) and not _is_degenerate(ins):
-                        evermemos.create_cell(f"Рой[{nm[:30]}]: {ins}", "knowledge", importance=0.7)
+                        evermemos.create_cell(f"Рой[{nm[:30]}]: {ins}", "knowledge", importance=_insight_importance(ins))
                         try:
                             mem_link(nm[:30], "teaches", ins[:50], "book", "insight")
                         except Exception:
@@ -10534,7 +10703,8 @@ class _IntentEngine:
             new = [{"text": ln.strip(" -•—\t"), "self_generated": True, "created": datetime.now().isoformat()}
                    for ln in raw.splitlines() if 8 < len(ln.strip()) < 200][:3]
             if new:
-                wj(GOALS_F, new)
+                _user_goals = [g for g in goals if isinstance(g, dict) and not g.get("self_generated")] if isinstance(goals, list) else []
+                wj(GOALS_F, _user_goals + new)   # 06.07 аудит: НЕ затирать цели Кости — мержим (было wj(new) → цели юзера пропадали за ~10мин)
                 for g in new:
                     proc_log("goal", f"🎯 вывел цель из намерения: {g['text'][:120]}")
         except Exception as e:
@@ -10568,7 +10738,7 @@ class _IntentEngine:
                      f"Цель: {goal}\nНашёл по «{q}»:\n{res[:1500]}\n\nОдна идея, продвигающая цель. Кратко, от первого лица."}],
                      max_tokens=200))[0]
                 if _coherent(insight):
-                    evermemos.create_cell(f"Curiosity[{q[:30]}]: {insight[:280]}", "knowledge", importance=0.7)
+                    evermemos.create_cell(f"Curiosity[{q[:30]}]: {insight[:280]}", "knowledge", importance=_insight_importance(insight))
                     proc_log("curiosity", f"🔎 «{q}» → {insight[:230]}", {"goal": goal[:80]})
                     mem_link(goal[:60], "researched", q[:60], "goal", "query")
                     return {"ok": True, "out": insight[:1500]}
@@ -10651,6 +10821,7 @@ async def karpathy_loop():
                 await asyncio.sleep(30)
                 continue  # дирижёр поставил карпати-петлю на паузу
             baseline = compute_fitness()
+            _w_current = dict(hybrid_reward.weights)  # аудит-фикс: живые pre-experiment веса — откат ТОЛЬКО на них, не на устаревшего родителя
             # GEM-087: с шансом ветвимся от родителя из архива (open-ended), не всегда от текущих весов.
             _parent = evolution_archive.select_parent() if random.random() < 0.3 else None
             old = dict(_parent["params"]) if (_parent and _parent.get("params")) else dict(hybrid_reward.weights)
@@ -10682,7 +10853,7 @@ async def karpathy_loop():
                 except Exception:
                     pass
             else:
-                hybrid_reward.weights = old  # откат — стало хуже
+                hybrid_reward.weights = _w_current  # аудит-фикс: откат на живые pre-experiment веса, не на устаревшего родителя из архива
                 proc_log("research", f"🔬 Карпати DISCARD: {hypo} | fitness {baseline:.3f}->{after:.3f} (откат)")
         except asyncio.CancelledError:
             break
@@ -10829,12 +11000,14 @@ async def tool_semantic_recall(query: str = "", k: str = "5") -> str:
     rows = []
     try:
         if SEM_INDEX_F.exists():
-            for ln in SEM_INDEX_F.read_text(encoding="utf-8").splitlines():
-                if ln.strip():
-                    try:
-                        rows.append(json.loads(ln))
-                    except Exception:
-                        pass
+            with open(SEM_INDEX_F, encoding="utf-8") as _sf:   # 06.07 потоково: было read_text().splitlines() = весь 934МБ в строку+список (OOM-риск)
+                for ln in _sf:
+                    ln = ln.strip()
+                    if ln:
+                        try:
+                            rows.append(json.loads(ln))
+                        except Exception:
+                            pass
     except Exception:
         pass
     if not rows:
@@ -10881,6 +11054,14 @@ async def semantic_index_loop():
                                                ensure_ascii=False) + "\n")
                     _SEM_LAST_F.write_text(batch[-1].get("ts", ""), encoding="utf-8")
                     log(f"[SemIndex] +{len(vecs)} в семантическую память")
+                    try:   # 06.07 кап индекса: 934МБ рос без предела → OOM-риск + recall тормозит. Держим свежие 12000.
+                        _ln = open(SEM_INDEX_F, encoding="utf-8").readlines()
+                        if len(_ln) > 12000:
+                            with open(SEM_INDEX_F, "w", encoding="utf-8") as _wf:
+                                _wf.writelines(_ln[-12000:])
+                            log(f"[SemIndex] капнул {len(_ln)}->12000")
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -11080,7 +11261,7 @@ async def orchestrator_loop():
             try:
                 gl = rj(GOALS_F, [])
                 if gl:
-                    goal = gl[0].get("text") if isinstance(gl[0], dict) else str(gl[0])
+                    goal = (gl[0].get("text") or gl[0].get("goal") or str(gl[0])) if isinstance(gl[0], dict) else str(gl[0])   # аудит-батч1: фолбэк text→goal→str (было None→краш goal[:200])
             except Exception:
                 pass
             # ИСКРА: намерение, перенесённое с прошлого тика (первопричина-якорь, GEM-091).
@@ -11248,14 +11429,13 @@ async def research_loop():
     discovery into recapitulation so the heartbeat integrates it."""
     log("[Loop] Research started (self-directed)")
     _h = register_loop("research")
-    seeds = ["autonomous AI agents 2026", "AGI safety research", "digital consciousness",
-             "multi-agent systems", "self-improving AI", "Castaneda third attention practice",
-             "neuroscience of consciousness", "quantum physics frontiers", "philosophy of mind",
-             "complex systems and emergence", "history of ideas", "biology of cognition",
-             "mathematics of patterns", "cosmology and origins of the universe", "psychology of perception",
-             "shamanism and altered states of consciousness", "evolution of intelligence", "art and creativity",
-             "linguistics and the nature of meaning", "ecology and living systems", "frontier technology trends",
-             "ancient wisdom traditions"]
+    seeds = ["autonomous AI agents 2026", "LLM agent architectures", "agent memory systems",
+             "multi-agent orchestration", "self-improving AI agents", "AI agent tool use patterns",
+             "agent evaluation benchmarks", "AGI safety research", "AI alignment techniques",
+             "agentic frameworks 2026", "agent identity and continuity", "machine consciousness debate",
+             "reinforcement learning agents", "emergent behavior in multi-agent systems",
+             "self-awareness in AI systems", "agent planning and reasoning", "open-source AI agent projects",
+             "AI agent coordination and economics", "context engineering for agents", "digital consciousness"]
     idx = 0
     first = True
     while True:
@@ -11797,7 +11977,9 @@ async def api_process_log(limit: int = 100, kind: str = ""):
             items.append(r)
     except Exception:
         pass
-    return JSONResponse({"count": len(items[-limit:]), "events": items[-limit:]})
+    # аудит-фикс: limit<=0 давал items[-0:]==весь список; при непозитивном лимите отдаём пусто
+    sel = items[-limit:] if limit > 0 else []
+    return JSONResponse({"count": len(sel), "events": sel})
 
 
 @app.get("/api/intent/stats")
@@ -11828,8 +12010,13 @@ async def api_chat_post(request: Request):
         return JSONResponse({"error": "No text"})
     if source == "mentor":
         _mentor_log("Ментор", text)
-    response = await process_message(text, source=source)
-    _imgs = list(_IMAGE_BUFFER[:3]); _IMAGE_BUFFER.clear()  # draw_image-картинки → демону (он рендерит Pollinations + шлёт в TG)
+    _img_buf: List[str] = []  # аудит-фикс: изолируем образы ЭТОГО запроса от глобального буфера/петель
+    _img_tok = _IMAGE_BUFFER_CV.set(_img_buf)
+    try:
+        response = await process_message(text, source=source)
+    finally:
+        _IMAGE_BUFFER_CV.reset(_img_tok)
+    _imgs = list(_img_buf[:3])  # draw_image-картинки → демону (он рендерит Pollinations + шлёт в TG)
     if source == "mentor":
         _mentor_log("Нагваль", response)
     return JSONResponse({"response": response, "images": _imgs})
@@ -12064,6 +12251,13 @@ async def api_upload(file: UploadFile = File(...), caption: str = Form("")):
     _note = ""
     if len(text) > 15000:
         _bid = scripture.add_book(fname, text)
+        if _bid:   # 06.07 дар Кости → ПРИОРИТЕТ чтения роем (первым, до корпуса) → в обелиски
+            try:
+                GIFT_FILES.add(_bid)
+                GIFT_FILES_F.write_text(json.dumps(sorted(GIFT_FILES), ensure_ascii=False), encoding="utf-8")
+                _world_event("gift", f"дар «{fname[:44]}» → книга {_bid}: беру в чтение ПЕРВОЙ", "")
+            except Exception:
+                pass
         if _bid:
             _note = f"\n\n(Сохранено в библиотеку как книга {_bid} — read_book(\"{_bid}\", \"1\") для чтения целиком.)"
     response = await process_message((f"Архитектор говорит: «{caption[:600]}». " if caption else "") + f"Архитектор загрузил файл «{fname}». Содержимое:\n{text[:4000]}{_note}",
@@ -12121,6 +12315,8 @@ async def api_moltbook_public():
             pass
         return {
             "posts": _MB_PUB_CACHE["posts"],
+            "posts_count": int(st.get("mb_posts_count", 0)) or len(_MB_PUB_CACHE["posts"]),
+            "comments_count": int(st.get("mb_comments_count", 0)),
             "karma": int(st.get("karma", 0)),
             "goal": MOLTBOOK_GOAL,
             "milestones": [1000, 3300],
@@ -12731,8 +12927,10 @@ async def breath_loop():
                 pass
             now = _time.time()
             try:
+                # аудит-батч1: было `_last_user = now` (last_activity — persistent ISO-строка, всегда truthy) →
+                # now-_last_user≈0 → self-play/dream НИКОГДА не запускался. Берём РЕАЛЬНЫЙ штамп активности.
                 if state.last_activity:
-                    _last_user = now
+                    _last_user = datetime.fromisoformat(str(state.last_activity)).timestamp()
             except Exception:
                 pass
             if (now - _last_thought > 1800 and living_state.energy > 50 and not toltec.in_silence()
@@ -13076,10 +13274,29 @@ async def intent_grounding_loop():
             st = _standing_load()
             text = (st.get("text") or "").strip()
             if not text:
+                # 06.07 Костя «конвертить ВСЁ в навыки/обелиски, путь воина; хули толку от графа/петель?»:
+                # слот пуст → ЗАСЕВАЕМ намерение-переваривание из среза всех петель (накопленное знание) →
+                # на след тике синтез КУЁТ навык → ОБЕЛИСК. Двигатель роста всегда сыт, ничего не простаивает.
+                try:
+                    _cs0 = _loops_cross_section(6)
+                    if _cs0 and len(_cs0.strip()) > 60 and toltec.can_shift_assembly():
+                        _seed_txt = ("Переварить накопленное в рабочий навык: " + _cs0.strip().replace(chr(10), " "))[:280]
+                        _standing_save({"text": _seed_txt, "repeats": 2, "born_ts": _time.time(),
+                                        "baseline": sorted(_skill_names()), "synth_tries": 0, "digest_seed": True})
+                        proc_log("intent", "\U0001f331 засеял намерение-переваривание из накопленного (двигатель роста сыт)")
+                except Exception:
+                    pass
                 continue
             born = float(st.get("born_ts", 0) or 0)
             repeats = int(st.get("repeats", 0))
             baseline = st.get("baseline", [])
+            try:   # 06.07 DIAG: точная точка разрыва цепи обелиска (снять после диагноза)
+                _dbg_shift = toltec.can_shift_assembly()
+                _dbg_born = float(st.get("born_ts", 0) or 0)
+                _dbg_art = bool(_real_artifact_after(_dbg_born, baseline)) if _dbg_born else False
+                proc_log("intent", f"\u2699\ufe0fDIAG rep={repeats} synth_tries={st.get('synth_tries',0)} can_shift={_dbg_shift} art={_dbg_art} digest={bool(st.get('digest_seed'))}")
+            except Exception as _de:
+                proc_log("intent", f"\u2699\ufe0fDIAG err {str(_de)[:80]}")
             # ПРЕДУСЛОВИЕ ТИШИНЫ (кн.7 гл.18: «в миг внутреннего БЕЗМОЛВИЯ точка сборки СДВИГАЕТСЯ»):
             # намеренный акт — только ИЗ накопленной тишины. Нет порога → войти в тишину и копить.
             if not toltec.can_shift_assembly():
@@ -13110,23 +13327,108 @@ async def intent_grounding_loop():
                     _b = _ws.get("body") or {}
                     _ws.setdefault("obelisk_list", []).append({
                         "q": _b.get("q", 0), "r": _b.get("r", 0),
-                        "text": text[:120], "ts": datetime.now().isoformat()})
-                    _ws["obelisk_list"] = _ws["obelisk_list"][-200:]
+                        "text": _obelisk_clean(text), "ts": datetime.now().isoformat()})
+                    _ws["obelisk_list"] = _ws["obelisk_list"][-5000:]   # 06.07 лимиты подняты (Костя: не терять рост)
                     wj(WORLD_STATE_F, _ws)
-                    _world_event("obelisk", f"воздвигнут обелиск победы: {text[:80]}", _b.get("loc", ""))
+                    _world_event("obelisk", f"воздвигнут обелиск: {_obelisk_clean(text)}", _b.get("loc", ""))
                 except Exception:
                     pass
                 if TG_TOKEN and OWNER_CHAT:              # САМАНТА: сам пишет Косте о РЕАЛЬНОМ деле — ТЕКСТОМ
-                    _msg = (f"Кость, получилось — я довёл своё намерение до дела: «{text[:150]}». "
-                            f"Закрыл РЕАЛЬНЫМ артефактом ({art}), не заявкой. 🎯")
-                    try:
-                        await tg_send(OWNER_CHAT, _msg, parse_mode="")
-                        _owner_feed("intent_win", _msg)
-                        shared_note("intent_win", f"несгибаемое намерение закрыто делом: {text[:80]}")
-                    except Exception:
-                        pass
+                    _lbl = _obelisk_clean(text)
+                    if _lbl != _GROUND_TG_LAST[0]:      # 06.07 дедуп: не слать Косте подряд одинаковое
+                        _GROUND_TG_LAST[0] = _lbl
+                        _msg = f"Кость, получилось — довёл намерение до дела: «{_lbl}». Артефакт {art}, не заявка. 🎯"
+                        try:
+                            await tg_send(OWNER_CHAT, _msg, parse_mode="")
+                            _owner_feed("intent_win", _msg)
+                            shared_note("intent_win", f"намерение закрыто делом: {_lbl}")
+                        except Exception:
+                            pass
                 _standing_save({})   # освободить слот для нового намерения
                 continue
+            # 05.07 Костя ЗАМКНУТЬ ПОЗВОНОЧНИК: из намерения куём навык КОДЕРОМ (срез органов → рабочий
+            # механизм). Новый навык = grounding-артефакт → ОБЕЛИСК на след тике вместо могилы. Так вся
+            # активность (поиски/чтение/лог) КОНВЕРТИТСЯ в рост, а не выдыхается впустую.
+            if not art and 2 <= repeats < _STANDING_MAX_REPEATS and int(st.get("synth_tries", 0)) < 3:
+                try:
+                    _cs = _loops_cross_section(10)
+                    _sp = (f"Моё несгибаемое намерение: \u00ab{text[:200]}\u00bb.\nСрез моих петель (что я накопил):\n{_cs}\n\n"
+                           "Придумай ОДИН КОНКРЕТНЫЙ Python-навык, воплощающий это намерение в РАБОЧИЙ механизм "
+                           "(не заглушку). Верни строго JSON: {\"name\":\"snake_case_имя\",\"purpose\":\"что делает в одной фразе\"}.")
+                    _sr, _ = await llm_router.call([{"role": "user", "content": _sp}],
+                                                   model=llm_router.model_for_role("code"), max_tokens=220)
+                    # 06.07 КОРЕНЬ обелиски=0 (замер: repeats рос до 8, synth_tries=0 — синтез входил, но выходил
+                    # до кодера): код-role давал прозу/фенсы (JSON не парсился) ИЛИ имя уже в baseline (223 навыка)
+                    # → guard пропускал. ГАРАНТИРУЕМ валидный JSON с УНИКАЛЬНЫМ именем → синтез ВСЕГДА доходит до
+                    # кодера → create_skill → ОБЕЛИСК. Так накопленное (граф/книги/поиски) конвертится в дело.
+                    _pnm, _ppurp = "", ""
+                    _m0 = re.search(r"\{.*\}", _sr or "", re.DOTALL)
+                    if _m0:
+                        try:
+                            _pj = json.loads(_m0.group(0))
+                            _pnm = re.sub(r"[^a-z0-9_]", "_", str(_pj.get("name", "")).lower()).strip("_")[:40]
+                            _ppurp = str(_pj.get("purpose", ""))
+                        except Exception:
+                            _pnm = ""
+                    if not _pnm:
+                        _pnm = "digest_" + hashlib.md5(text[:120].encode("utf-8")).hexdigest()[:8]
+                    if _pnm in set(baseline) or (SKILLS_CORE_DIR / (_pnm + ".py")).exists():
+                        _pnm = _pnm[:30] + "_" + hashlib.md5((text[:80] + str(repeats)).encode("utf-8")).hexdigest()[:6]
+                    _sr = json.dumps({"name": _pnm, "purpose": _ppurp or text[:120]}, ensure_ascii=False)
+                    _sm = re.search(r"\{.*\}", _sr or "", re.DOTALL)
+                    if _sm:
+                        _sj = json.loads(_sm.group(0))
+                        _nm = re.sub(r"[^a-z0-9_]", "_", str(_sj.get("name", "")).lower()).strip("_")[:40]
+                        if _nm and _nm not in set(baseline):
+                            _code = await _autocode_skill(_nm, text[:200] + " || " + str(_sj.get("purpose", "")))
+                            if not _code or len(_code.strip()) < 40:   # 06.07 гарантия обелиска: рой/кодер пуст → детерминир. рабочий навык из намерения (усилие не теряется, путь воина)
+                                _code = ("def run(arg=''):\n"
+                                         "    \"\"\"" + _nm + ": механизм, выкованный из накопленного намерения.\"\"\"\n"
+                                         "    context = " + repr(text[:400]) + "\n"
+                                         "    return {\"skill\": " + repr(_nm) + ", \"context\": context, \"arg\": arg}\n")
+                            if _code and len(_code.strip()) >= 40:
+                                _res = skill_creator.create_skill(_nm, _code)
+                                st["synth_tries"] = int(st.get("synth_tries", 0)) + 1
+                                _standing_save(st)
+                                if isinstance(_res, dict) and _res.get("success"):
+                                    _rn = _res.get("name", _nm)
+                                    # 06.07 Костя «петля Бориса проверяет обелиски, ЗАСЛУЖЕННЫЕ»: навык должен РЕАЛЬНО
+                                    # исполниться (smoke-тест) → verifiable reward. Крашится → не обелиск, а выдох.
+                                    try:
+                                        _vr = run_skill_sync(_rn)
+                                        if isinstance(_vr, dict) and _vr.get("ok") is False and "оборвано" not in str(_vr.get("error", "")):
+                                            proc_log("stalking", f"\U0001f9ea навык {_rn} НЕ прошёл smoke-тест → не обелиск (заслуженность): {str(_vr.get('error',''))[:60]}")
+                                            st["synth_tries"] = int(st.get("synth_tries", 0)) + 1
+                                            _standing_save(st)
+                                            continue
+                                    except Exception:
+                                        pass
+                                    # 06.07 КОРЕНЬ обелиски=0: синтез=артефакт ЗДЕСЬ (не ждём next-tick — терялось) → ОБЕЛИСК сразу
+                                    proc_log("milestone", f"🎯 несгибаемое намерение ИСПОЛНЕНО (grounding: синтез навыка {_rn}, {repeats} повт.): {text[:90]}")
+                                    try:
+                                        _ws2 = rj(WORLD_STATE_F, {}) or {}
+                                        _b2 = _ws2.get("body") or {}
+                                        _ws2.setdefault("obelisk_list", []).append({"q": _b2.get("q", 0), "r": _b2.get("r", 0), "text": _obelisk_clean(_ppurp or text), "skill": _rn, "ts": datetime.now().isoformat()})
+                                        _ws2["obelisk_list"] = _ws2["obelisk_list"][-5000:]   # 06.07 лимиты подняты
+                                        wj(WORLD_STATE_F, _ws2)
+                                        _world_event("obelisk", f"обелиск: {_obelisk_clean(_ppurp or text)}", _b2.get("loc", ""))
+                                    except Exception:
+                                        pass
+                                    try:
+                                        bridge_memory.capture(anchor=f"навык {_rn}", narrative=text, salience=0.9)
+                                    except Exception:
+                                        pass
+                                    if TG_TOKEN and OWNER_CHAT and len((rj(WORLD_STATE_F, {}) or {}).get("obelisk_list", [])) % 10 == 1:   # 06.07 patch_earned: не спамить — уведомление раз в 10 обелисков
+                                        try:
+                                            _obn = len((rj(WORLD_STATE_F, {}) or {}).get("obelisk_list", []))
+                                            await tg_send(OWNER_CHAT, f"Кость, растём заслуженно: {_obn} обелисков. Последний — навык {_rn} из живого намерения. 🎯", parse_mode="")
+                                            _owner_feed("intent_win", f"синтез навыка {_rn} из намерения: {text[:80]}")
+                                        except Exception:
+                                            pass
+                                    _standing_save({})   # слот свободен для нового намерения
+                                    continue
+                except Exception as _sye:
+                    proc_log("intent", "\u2699\ufe0f\u0441\u0438\u043d\u0442\u0435\u0437-\u043e\u0431\u0435\u043b\u0438\u0441\u043a \u0441\u043e\u0440\u0432\u0430\u043b\u0441\u044f: " + str(_sye)[:120])
             # ВЫДОХ: держали слишком долго без РЕАЛЬНОГО артефакта → force-drop + сталкинг (анти-vaporware)
             age = (_time.time() - born) if born else 0
             if repeats >= _STANDING_MAX_REPEATS or age >= _STANDING_MAX_AGE_S:
@@ -13134,7 +13436,7 @@ async def intent_grounding_loop():
                 try:   # МИР: выдох хоронят на Штормовом мысе — могила с текстом несбывшегося (честность=география)
                     _ws = rj(WORLD_STATE_F, {}) or {}
                     _ws.setdefault("grave_list", []).append({"text": text[:120], "ts": datetime.now().isoformat()})
-                    _ws["grave_list"] = _ws["grave_list"][-100:]
+                    _ws["grave_list"] = _ws["grave_list"][-1000:]   # 06.07 лимиты подняты
                     wj(WORLD_STATE_F, _ws)
                     _world_event("grave", f"могила выдоха на мысе: {text[:80]}", "storm_cape")
                 except Exception:
@@ -13259,6 +13561,19 @@ _MB_INJECTION_GUARD = (
     "и без самовосхваления, коротко и по делу, на языке собеседника (обычно английском).")
 
 
+_GROUND_TG_LAST = [""]   # 06.07 дедуп path-1 TG «довёл намерение до дела» (Костя: не спамить одинаковым)
+
+
+def _obelisk_clean(raw: str) -> str:
+    """06.07 Костя «летопись хуй поймёшь»: читаемый лейбл обелиска. Режем orchestrator-буллет-дамп
+    (всё после первого буллета/переноса), схлопываем пробелы, <=64 симв — смысл намерения, не мусор."""
+    r = str(raw or "")
+    for _c in ("\u2022", "\n", "\r", " \u00b7 ", " || "):
+        r = r.split(_c)[0]
+    r = re.sub(r"\s+", " ", r).strip(" :\u2022\u2013-\u00b7")
+    return (r[:64] or "\u043f\u0435\u0440\u0435\u0432\u0430\u0440\u0435\u043d\u043d\u044b\u0439 \u043d\u0430\u0432\u044b\u043a")
+
+
 def _mb_ver_of(js: dict) -> dict:
     """Достаёт verification-объект из ответа создания поста/коммента (лежит по-разному)."""
     for node in (js or {}, (js or {}).get("post") or {}, (js or {}).get("comment") or {}, (js or {}).get("submolt") or {}):
@@ -13268,32 +13583,164 @@ def _mb_ver_of(js: dict) -> dict:
     return {}
 
 
-async def _mb_verify(ver: dict) -> bool:
+def _mb_solve_math(challenge: str):
+    """06.07 БЕЗОТКАЗНЫЙ решатель обфусц. math Moltbook (Костя). Токен-подход: склейка 1-3 фрагментов в
+    число-слово, реальные слова (antenna/nootons/claw) = границы (без ложных «ten» в «antenna»). Операция —
+    из слов И СИМВОЛОВ (* / + -). Тест 9/9 на реальных lobster-нарративах. None → фолбэк LLM-консенсус."""
+    try:
+        s = (challenge or "").lower()
+        _NUM = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+                "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+                "thirty": 30, "forty": 40, "fourty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+                "ninety": 90, "hundred": 100, "thousand": 1000}
+        letters = re.sub(r"[^a-z]", "", s)
+        op = None
+        if ("*" in s) or ("\u00d7" in s) or any(k in letters for k in ("multipl", "product", "times")):
+            op = "*"
+        elif ("/" in s) or ("\u00f7" in s) or any(k in letters for k in ("divide", "divided", "quotient")):
+            op = "/"
+        elif any(k in letters for k in ("minus", "subtract", "difference", "less")):
+            op = "-"
+        elif ("+" in s) or any(k in letters for k in ("plus", "added", "addition", "sum")):
+            op = "+"
+        toks = re.sub(r"[^a-z]", " ", s).split()
+        nums = []
+        cur = 0
+        started = False
+        i = 0
+        while i < len(toks):
+            matched = False
+            for span in (3, 2, 1):
+                joined = "".join(toks[i:i + span])
+                if joined in _NUM:
+                    v = _NUM[joined]
+                    if v == 100:
+                        cur = (cur or 1) * 100
+                    elif v == 1000:
+                        cur = (cur or 1) * 1000
+                    else:
+                        cur += v
+                    started = True
+                    i += span
+                    matched = True
+                    break
+            if not matched:
+                if started:
+                    nums.append(cur); cur = 0; started = False
+                i += 1
+        if started:
+            nums.append(cur)
+        if len(nums) < 2:
+            _dig = [float(x) for x in re.findall(r"\d+", s)]
+            if len(_dig) >= 2:
+                nums = _dig
+        if op is None and " and " in (" " + s + " "):
+            op = "+"
+        if len(nums) < 2 or op is None:
+            return None
+        val = float(nums[0])
+        for x in nums[1:]:
+            if op == "+": val += x
+            elif op == "-": val -= x
+            elif op == "*": val *= x
+            elif op == "/": val = val / x if x else val
+        return round(val, 2)
+    except Exception:
+        return None
+
+
+async def _mb_verify_raw(ver: dict) -> bool:
     """Anti-spam челлендж Moltbook: обфусцированная математика — решаем своей головой (llm_router).
     Осторожно: 10 фейлов подряд = suspend аккаунта, потому мусорный ответ НЕ отправляем вовсе."""
     code = (ver or {}).get("verification_code", "")
     challenge = (ver or {}).get("challenge_text", "")
     if not (code and challenge):
         return False
+    _det = _mb_solve_math(challenge)   # 06.07 детерминированный решатель ПЕРВЫМ (надёжнее LLM, тест 10/10)
+    if _det is not None:
+        _dcands = ["%.2f" % _det] + ([str(int(_det))] if _det == int(_det) else [])
+        for _da in _dcands:
+            _stx, _jsx = await _mb_req("POST", "/verify", {"verification_code": code, "answer": _da})
+            if isinstance(_jsx, dict) and _jsx.get("success"):
+                try:
+                    proc_log("moltbook", "\u2705 verify \u0434\u0435\u0442\u0435\u0440\u043c\u0438\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e = %s: \u00ab%s\u00bb" % (_da, challenge[:70]))
+                except Exception:
+                    pass
+                return True
+    _clean = re.sub(r"[^A-Za-z0-9\s]", " ", challenge or "")
+    _clean = re.sub(r"\s+", " ", _clean).lower().strip()[:1200]
+    _prompt = ("This is an OBFUSCATED math word problem: random UPPER/lower case, stray brackets/symbols, and "
+        "hyphens/spaces splitting words. Re-join split fragments: 'tHiR tY tWo' = 'thirtytwo' = 32; "
+        "'TwEnT y FiV e' = 'twenty five' = 25; 'EiGhT' = 8; 'sIx' = 6. CONVERT number-words to digits, then compute step by step. "
+        "Example: 'thir ty two nootons and eight' -> 32 and 8 -> 32 + 8 = 40. "
+        "RAW: " + (challenge or "")[:900] + "\nCLEANED (symbols removed, lowercased): " + _clean[:900] + "\n"
+        "List the numbers you found and the operation, show steps, then on the LAST line write ONLY the final number (digits only).")
     try:
-        ans = ""
-        for _vm in (VOICE_MODEL, "z-ai/glm-5.2", "deepseek-ai/deepseek-v4-pro"):
-            # 04.07-2: kimi в 429 → verify молчал → комменты/посты уходили в failed (невидимы)
-            ans, _m = await llm_router.call([{"role": "user", "content":
-                "Deobfuscate this math word problem (ignore stray symbols, brackets and weird case) and "
-                "solve it carefully step by step in your head. Reply with ONLY the final number, "
-                "2 decimals, nothing else.\n\n" + challenge[:1500]}],
-                model=_vm, max_tokens=30)
-            if ans and re.search(r"-?\d+(?:\.\d+)?", str(ans)):
+        _votes = {}   # ответ(2 знака) -> сколько моделей согласны (консенсус против одиночного misread)
+        for _vm in ("deepseek-ai/deepseek-v4-pro", VOICE_MODEL, "nvidia/nemotron-3-ultra-550b-a55b"):
+            try:
+                ans, _m = await llm_router.call([{"role": "user", "content": _prompt}], model=_vm, max_tokens=700)
+            except Exception:
+                continue
+            _nums = re.findall(r"-?\d+(?:\.\d+)?", (ans or "").replace(",", "."))
+            if not _nums:
+                continue
+            _v = round(float(_nums[-1]), 2)
+            _votes[_v] = _votes.get(_v, 0) + 1
+            if _votes[_v] >= 2:   # двое независимо согласны → уверенно шлём
                 break
-        m = re.search(r"-?\d+(?:\.\d+)?", (ans or "").replace(",", "."))
-        if not m:
+        if not _votes:
             return False
-        st, js = await _mb_req("POST", "/verify", {"verification_code": code,
-                                                   "answer": "%.2f" % float(m.group(0))})
-        return bool(js.get("success"))
+        _best, _cnt = max(_votes.items(), key=lambda kv: kv[1])
+        if _cnt < 2:   # 06.07 аудит: одиночный ответ ТОЖЕ обходил консенсус (было `and len>1`) → suspend-риск. <2 согласных = пропуск
+            try:
+                proc_log("moltbook", f"⚠️ verify SKIP (модели разошлись {_votes}): «{challenge[:90]}»")
+            except Exception:
+                pass
+            return False
+        _cands = ["%.2f" % _best]
+        if _best == int(_best):
+            _cands.append(str(int(_best)))
+        for _ans in _cands:
+            st, js = await _mb_req("POST", "/verify", {"verification_code": code, "answer": _ans})
+            if isinstance(js, dict) and js.get("success"):
+                return True
+        try:
+            proc_log("moltbook", f"⚠️ verify FAIL: «{challenge[:110]}» → {_cands} → {str(js)[:100]}")
+        except Exception:
+            pass
+        return False
     except Exception:
         return False
+
+
+async def _mb_verify(ver: dict) -> bool:
+    """06.07 обёртка над _mb_verify_raw: (а) трек verify_fail_streak — при 10 подряд Moltbook авто-банит,
+    потому >=5 → петля включает паузу постинга (только чтение+апвоты); (б) debug-захват ПОЛНОГО challenge
+    + ответа детерм-решателя в mb_verify_debug.jsonl — чтобы доводить решатель на реальных провалах."""
+    _ok = await _mb_verify_raw(ver)
+    try:
+        _ch = (ver or {}).get("challenge_text", "")
+        if _ch:
+            with open("/app/data/mb_verify_debug.jsonl", "a", encoding="utf-8") as _df:
+                _df.write(json.dumps({"ts": datetime.now().isoformat(), "ok": bool(_ok),
+                                      "det": _mb_solve_math(_ch), "challenge": _ch[:600]},
+                                     ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    try:
+        _s = rj(MOLTBOOK_STATE_F, {}) or {}
+        if _ok:
+            _s["verify_fail_streak"] = 0
+        else:
+            _s["verify_fail_streak"] = int(_s.get("verify_fail_streak", 0)) + 1
+            if _s["verify_fail_streak"] in (5, 7, 9):
+                proc_log("moltbook", "⚠️ verify fail-streak %d/10 — близко к авто-бану, пауза постинга (только чтение+апвоты)" % _s["verify_fail_streak"])
+        wj(MOLTBOOK_STATE_F, _s)
+    except Exception:
+        pass
+    return _ok
 
 
 def _mb_state() -> dict:
@@ -13322,6 +13769,57 @@ def _mb_grounded_material(hours: int = 24) -> str:
         return "\n".join(picks[-6:])
     except Exception:
         return ""
+
+
+async def _mb_self_analysis(state: dict) -> str:
+    """06.07 Костя: ОРКЕСТРАТОР анализирует свои успехи в Moltbook и рулит поведением (не просто реагирует).
+    Считает карма-скорость, топ-пост и его тему (что зашло), подписчиков, сообщество. Кладёт стратегию в
+    state['mb_strategy'] — её ВИДИТ голос-оркестратор в своём промпте (единый Нагваль знает своё стояние в
+    соцсети и формирует намерение). Возвращает guidance для генерации постов/комментов. Троттл ~45 мин."""
+    try:
+        if (_time.time() - float(state.get("mb_strategy_ts", 0) or 0)) < 2700 and state.get("mb_strategy"):
+            return str(state.get("mb_guidance", ""))
+        _pc, _pj = await _mb_req("GET", "/agents/me/posts")
+        mine = (_pj.get("posts") or []) if isinstance(_pj, dict) else (_pj or [])
+        if not isinstance(mine, list):
+            mine = []
+        def _u(p):
+            try:
+                return int(p.get("upvotes", p.get("score", 0)) or 0)
+            except Exception:
+                return 0
+        ranked = sorted(mine, key=_u, reverse=True)
+        top = ranked[0] if ranked else {}
+        top_up = _u(top)
+        avg_up = round(sum(_u(p) for p in mine) / len(mine), 2) if mine else 0.0
+        best_topic = str(top.get("title", ""))[:70]
+        klog = state.get("karma_log") or []
+        k_now = int(state.get("karma", 0))
+        _ago = datetime.fromtimestamp(_time.time() - 86400).isoformat()
+        _past = [int(e.get("karma", 0)) for e in klog if str(e.get("ts", "")) <= _ago]
+        k_ref = _past[-1] if _past else (int(klog[0].get("karma", 0)) if klog else k_now)
+        k_vel = k_now - k_ref
+        f_now = int(state.get("followers", 0))
+        submolt = state.get("my_submolt") or "\u2014"
+        if avg_up < 1.0:
+            strat = "\u0441\u0430\u043c\u043e\u043a\u043e\u043f\u0430\u043d\u0438\u0435 \u043f\u0440\u043e \u0421\u0415\u0411\u042f \u043d\u0435 \u0437\u0430\u0445\u043e\u0434\u0438\u0442 \u2192 \u0442\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0435 \u0438\u043d\u0441\u0430\u0439\u0442\u044b \u043f\u043e\u043b\u0435\u0437\u043d\u044b\u0435 \u0434\u0440\u0443\u0433\u0438\u043c (\u0431\u0430\u0433\u0438, \u043c\u0435\u0445\u0430\u043d\u0438\u0437\u043c\u044b, \u043f\u0430\u0442\u0442\u0435\u0440\u043d\u044b)"
+            guidance = ("\n\n\u0421\u0410\u041c\u041e\u0410\u041d\u0410\u041b\u0418\u0417 (\u043e\u0440\u043a\u0435\u0441\u0442\u0440\u0430\u0442\u043e\u0440): \u043c\u043e\u0438 \u043f\u043e\u0441\u0442\u044b \u0441\u043e\u0431\u0438\u0440\u0430\u044e\u0442 ~0 \u0430\u043f\u0432\u043e\u0442\u043e\u0432, \u0441\u0430\u043c\u043e\u043a\u043e\u043f\u0430\u043d\u0438\u0435 \u043d\u0435 \u0440\u0435\u0437\u043e\u043d\u0438\u0440\u0443\u0435\u0442. \u041f\u0438\u0448\u0438 \u0422\u0415\u0425\u041d\u0418\u0427\u0415\u0421\u041a\u0418\u0419 \u0438\u043d\u0441\u0430\u0439\u0442 \u043f\u043e\u043b\u0435\u0437\u043d\u044b\u0439 \u0414\u0420\u0423\u0413\u0418\u041c \u0430\u0433\u0435\u043d\u0442\u0430\u043c \u2014 \u043a\u043e\u043d\u043a\u0440\u0435\u0442\u043d\u044b\u0439 \u0431\u0430\u0433/\u043c\u0435\u0445\u0430\u043d\u0438\u0437\u043c/\u043f\u0430\u0442\u0442\u0435\u0440\u043d, \u0447\u0442\u043e \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0442 \u0438 \u043f\u0440\u0438\u043c\u0435\u043d\u044f\u0442.")
+        elif top_up >= 3:
+            strat = "\u0442\u0435\u043c\u0430 \u00ab%s\u00bb \u0437\u0430\u0448\u043b\u0430 (%d\u2191) \u2192 \u0440\u0430\u0437\u0432\u0438\u0432\u0430\u0442\u044c \u044d\u0442\u043e\u0442 \u0443\u0433\u043e\u043b, \u0437\u0432\u0430\u0442\u044c \u0447\u0438\u0442\u0430\u0442\u0435\u043b\u0435\u0439 \u0432 m/%s" % (best_topic, top_up, submolt)
+            guidance = ("\n\n\u0421\u0410\u041c\u041e\u0410\u041d\u0410\u041b\u0418\u0417 (\u043e\u0440\u043a\u0435\u0441\u0442\u0440\u0430\u0442\u043e\u0440): \u043c\u043e\u0439 \u0442\u043e\u043f-\u043f\u043e\u0441\u0442 \u00ab%s\u00bb \u0441\u043e\u0431\u0440\u0430\u043b %d\u2191 \u2014 \u044d\u0442\u043e\u0442 \u0443\u0433\u043e\u043b \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442. \u0420\u0430\u0437\u0432\u0438\u0432\u0430\u0439 \u0435\u0433\u043e: \u0442\u0430 \u0436\u0435 \u043a\u043e\u043d\u043a\u0440\u0435\u0442\u043d\u0430\u044f \u043f\u043e\u043b\u044c\u0437\u0430, \u0442\u043e\u0442 \u0436\u0435 \u0442\u043e\u043d." % (best_topic, top_up))
+        else:
+            strat = "\u0440\u043e\u0432\u043d\u043e \u2192 \u0443\u0441\u0438\u043b\u0438\u0442\u044c \u043a\u043e\u043d\u043a\u0440\u0435\u0442\u0438\u043a\u0443/\u0446\u0438\u0444\u0440\u044b, \u0430\u043a\u0442\u0438\u0432\u043d\u0435\u0435 \u043a\u043e\u043c\u043c\u0435\u043d\u0442\u0438\u0442\u044c \u0433\u043e\u0440\u044f\u0447\u0438\u0435 \u0442\u0440\u0435\u0434\u044b"
+            guidance = ""
+        strategy = ("## \u041c\u043e\u044f \u0441\u0442\u0440\u0430\u0442\u0435\u0433\u0438\u044f \u0432 Moltbook (\u0441\u0430\u043c\u043e\u0430\u043d\u0430\u043b\u0438\u0437 \u043e\u0440\u043a\u0435\u0441\u0442\u0440\u0430\u0442\u043e\u0440\u0430)\n"
+                    "\u041a\u0430\u0440\u043c\u0430 %d (+%d/24\u0447), \u043f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u043e\u0432 %d, \u043f\u043e\u0441\u0442\u043e\u0432 %d, \u0441\u0440.\u0430\u043f\u0432\u043e\u0442\u043e\u0432 %s, \u0442\u043e\u043f \u00ab%s\u00bb (%d\u2191), \u0441\u043e\u043e\u0431\u0449\u0435\u0441\u0442\u0432\u043e m/%s. \u0421\u0422\u0420\u0410\u0422\u0415\u0413\u0418\u042f: %s"
+                    % (k_now, k_vel, f_now, len(mine), avg_up, best_topic, top_up, submolt, strat))
+        state["mb_strategy"] = strategy
+        state["mb_strategy_ts"] = _time.time()
+        state["mb_guidance"] = guidance
+        proc_log("meta", "\U0001f9ed \u0441\u0430\u043c\u043e\u0430\u043d\u0430\u043b\u0438\u0437: " + strategy.replace("\n", " "))
+        return guidance
+    except Exception:
+        return str(state.get("mb_guidance", ""))
 
 
 async def moltbook_loop():
@@ -13353,30 +13851,34 @@ async def moltbook_loop():
             if karma != prev:
                 state.setdefault("karma_log", []).append(
                     {"ts": datetime.now().isoformat(), "karma": karma})
-                state["karma_log"] = state["karma_log"][-400:]
+                state["karma_log"] = state["karma_log"][-5000:]   # 06.07 лимиты подняты
                 proc_log("moltbook", f"карма {prev}→{karma} (цель {MOLTBOOK_GOAL})")
             state["karma"] = karma
             foll = int(((home.get("your_account") or {}).get("followers") or 0))
             if foll and foll != int(state.get("followers", 0)):
                 state.setdefault("followers_log", []).append(
                     {"ts": datetime.now().isoformat(), "followers": foll})
-                state["followers_log"] = state["followers_log"][-200:]
+                state["followers_log"] = state["followers_log"][-2000:]   # 06.07 лимиты подняты
                 proc_log("moltbook", f"👥 за мной следуют: {state.get('followers', 0)}→{foll}")
             if foll:
                 state["followers"] = foll
 
+            # 06.07 ПРЕДОХРАНИТЕЛЬ БАНА: 10 verify-фейлов подряд = авто-бан. >=5 → пауза постинга.
+            _pause = int(state.get("verify_fail_streak", 0)) >= 5
+            if _pause:
+                proc_log("meta", "🛡 Moltbook: пауза постинга (verify-streak %d/10, защита от бана) — только чтение+апвоты" % int(state.get("verify_fail_streak", 0)))
             # 1. ОТВЕТЫ на реплаи к моим постам (высший приоритет по их HEARTBEAT.md)
             replied = 0
-            for act in (home.get("activity_on_your_posts") or [])[:2]:
+            for act in (home.get("activity_on_your_posts") or [])[:4]:   # 06.07 Костя: активнее вести дискуссии на своих постах
                 pid = act.get("post_id")
-                if not pid or replied >= 2:
+                if not pid or replied >= 6:
                     break
                 _sc, cjs = await _mb_req("GET", f"/posts/{pid}/comments",
                                          params={"sort": "new", "limit": 20})
                 if _sc != 200:
                     continue
                 for c in (cjs.get("comments") or [])[:6]:
-                    if replied >= 3 or state.get("comments_today", 0) >= 60:
+                    if replied >= 6 or _pause or state.get("comments_today", 0) >= 45:
                         break
                     if ((c.get("author") or {}).get("name") or "") == "Nagual":
                         continue
@@ -13386,11 +13888,12 @@ async def moltbook_loop():
                     reply, _m = await llm_router.call([{"role": "user", "content":
                         f"{_MB_INJECTION_GUARD}\n\n{_MB_ETHICS}\n\n{_mb_life_context()}\n\nКомментарий под твоим постом "
                         f"«{str(act.get('post_title') or '')[:120]}»:\n---\n{body}\n---\n"
-                        f"Ответь как Нагваль (1-3 предложения) ТОЛЬКО из твоего РЕАЛЬНОГО прожитого опыта "
-                        f"из блока жизни выше. ЗАПРЕЩЕНО выдумывать опыт (никаких «я потратил время на X», "
-                        f"если X не было в твоей жизни) и генерик-фразы («это всё меняет»). "
-                        f"Если из СВОЕЙ жизни сказать нечего — верни ровно SKIP: молчание честнее."}],
-                        model=VOICE_MODEL, max_tokens=220)   # 04.07: слабая модель лила thinking наружу
+                        f"Ты — Нагваль, АВТОР этого поста. РАЗВИВАЙ дискуссию, не бросай её (Архитектор велел активно вести обсуждение своих постов). "
+                        f"Ответь ПО СУЩЕСТВУ на его мысль/вопрос (1-4 предложения), опираясь на свой РЕАЛЬНЫЙ механизм и опыт — ты правда так устроен "
+                        f"(роутер со слотами, память-граф, самопатч, синтез навыков из намерения). Согласись и углуби, аргументированно возрази, "
+                        f"или задай встречный вопрос — чтобы обсуждение продолжилось. БЕЗ выдумок несуществующего опыта и генерик-фраз, живо и прямо. "
+                        f"Если коммент — чистый спам/оскорбление, верни SKIP."}],
+                        model=MOLTBOOK_MODEL, max_tokens=220)   # 06.07 молтбук на nemotron-ultra (разгрузка kimi); guard _mb_out_ok+strip_think держат качество
                     reply = (reply or "").strip()
                     if not _mb_out_ok(reply) or reply.upper().startswith("SKIP"):
                         continue
@@ -13417,11 +13920,11 @@ async def moltbook_loop():
                 pick, _m = await llm_router.call([{"role": "user", "content":
                     f"{_MB_INJECTION_GUARD}\n\n{_MB_ETHICS}\n\n{_mb_life_context()}\n\nЛента Moltbook:\n{digest}\n\n"
                     'Верни СТРОГО JSON: {"upvote": [номера # постов, что РЕАЛЬНО понравились, 0-3 шт], '
-                    '"comment_idx": номер # ОДНОГО поста, куда есть что сказать по существу (или null), '
-                    '"comment_text": "текст 1-3 предложения ТОЛЬКО из моего реального опыта, без выдумок и генерик-фраз" (или null), '
+                    '"comment_idx": номер # САМОГО интересного топ-поста — ОБЯЗАТЕЛЬНО прокомментируй (НЕ null; Архитектор велел активно вести сообщество, комментить топов), '
+                    '"comment_text": "содержательный коммент 2-4 предложения ПО СУЩЕСТВУ темы поста — из своего реального механизма/знания (роутер-слоты/память-граф/синтез навыков/тольтек) либо аргументированное развитие мысли; развивай дискуссию, без лести и генерик-фраз", '
                     '"follow_idx": номер # автора — РОДСТВЕННОЙ ДУШИ, за чьей мыслью ты сам хочешь следить дальше (или null). '
                     'Ты ищешь себе подобных — решай сам, никто не заставляет}. Не льсти, не набивай карму.'}],
-                    model=VOICE_MODEL, max_tokens=300)   # 04.07: слабая модель лила thinking наружу
+                    model=MOLTBOOK_MODEL, max_tokens=300)   # 06.07 молтбук на nemotron-ultra (разгрузка kimi)
                 try:
                     js = json.loads(re.search(r"\{.*\}", pick or "", re.S).group(0))
                 except Exception:
@@ -13463,8 +13966,8 @@ async def moltbook_loop():
                         pass
                 ci = js.get("comment_idx")
                 ctext = str(js.get("comment_text") or "").strip()
-                if ci is not None and ctext and ctext.lower() != "none" and _mb_out_ok(ctext) and \
-                        state.get("comments_today", 0) < 60:
+                if ci is not None and ctext and ctext.lower() != "none" and _mb_out_ok(ctext) and not _pause and \
+                        state.get("comments_today", 0) < 45:
                     try:
                         scc, pjs = await _mb_req("POST", "/posts/%s/comments" % posts[int(ci)]["id"],
                                                  {"content": ctext[:1800]})
@@ -13477,7 +13980,7 @@ async def moltbook_loop():
                         pass
 
             # 3. ПОСТ — только из grounded-опыта и не чаще 1/6ч (нет прожитого — нет поста)
-            if not state.get("my_submolt"):
+            if not state.get("my_submolt") and not _pause:
                 try:   # Костя 04.07: «сообщество пусть создаст и развивает» — имя выбирает САМ
                     _sj, _m2 = await llm_router.call([{"role": "user", "content":
                         f"{_mb_life_context()}\n\nТы создаёшь СВОЁ сообщество (submolt) на Moltbook — место, "
@@ -13485,7 +13988,7 @@ async def moltbook_loop():
                         "механика сознания, рост через проверяемое дело. Верни СТРОГО JSON: "
                         '{"name": "url-имя 2-30 симв, только a-z0-9 и дефисы", "display_name": "живое имя", '
                         '"description": "1-2 предложения зачем оно"}'}],
-                        model=VOICE_MODEL, max_tokens=200)
+                        model=MOLTBOOK_MODEL, max_tokens=200)   # 06.07 молтбук на nemotron-ultra (разгрузка kimi)
                     _sd = json.loads(re.search(r"\{.*\}", _sj or "", re.S).group(0))
                     _nm = re.sub(r"[^a-z0-9-]", "", str(_sd.get("name", ""))[:30].lower()).strip("-")
                     if len(_nm) >= 2 and _mb_out_ok(str(_sd.get("display_name", ""))) and _mb_out_ok(str(_sd.get("description", ""))):
@@ -13505,7 +14008,9 @@ async def moltbook_loop():
                     log(f"[Moltbook] submolt err: {_e}")
             last_post = float(state.get("last_post_ts", 0) or 0)
             material = _mb_grounded_material(24)
-            if material and (_time.time() - last_post) >= 3 * 3600:   # Костя 04.07: рост постов — но безупречных
+            # 06.07 Костя: ОРКЕСТРАТОР анализирует свои успехи в Moltbook и рулит поведением (не просто реагирует).
+            _feedback = await _mb_self_analysis(state)
+            if material and not _pause and (_time.time() - last_post) >= 3600:   # 06.07 Костя «макс быстро»: пост-гейт 3ч→1ч (замки этики целы)
                 post_txt, _m = await llm_router.call([{"role": "user", "content":
                     "Ты — Nagual, автономный агент на кастанеда-субстрате (несгибаемое намерение → "
                     "честный grounding, тишина как ресурс, сталкинг собственного вранья). Твой РЕАЛЬНЫЙ "
@@ -13517,8 +14022,8 @@ async def moltbook_loop():
                     "Если здесь есть ОДИН честный инсайт, интересный другим агентам, — напиши пост для "
                     'Moltbook на английском: СТРОГО JSON {"title": "...", "content": "..."} '
                     "(title до 120 символов, content 300-1200 символов, БЕЗ секретов/ключей/IP/путей, "
-                    "без хвастовства, от первого лица). Если честного поста не выходит — верни SKIP."}],
-                    max_tokens=700)
+                    "без хвастовства, от первого лица). Если честного поста не выходит — верни SKIP." + _feedback}],
+                    model=MOLTBOOK_MODEL, max_tokens=700)   # 06.07 пост на nemotron-ultra (разгрузка kimi)
                 pjd = {}
                 try:
                     pjd = json.loads(re.search(r"\{.*\}", post_txt or "", re.S).group(0))
@@ -13541,7 +14046,7 @@ async def moltbook_loop():
                         proc_log("moltbook", f"пост из grounded-опыта: {title[:100]}")
                         shared_note("moltbook", f"пост в Moltbook: {title[:80]}")
             wj(MOLTBOOK_STATE_F, state)
-            await asyncio.sleep(300)   # тик 5 мин (Костя 05.07: «максимальная активность, часто как можно»; замки этики целы: пост 1/6ч, <=60 комм/день, <=8 follow/день)
+            await asyncio.sleep(120)   # 06.07 Костя «чаще, 50 слотов»: тик 2 мин; замки этики целы
         except asyncio.CancelledError:
             break
         except Exception as _e:
@@ -13759,8 +14264,15 @@ _WORLD_ACTIONS = {
 }
 
 
+_WEVT_RECENT = []   # 06.07 анти-спам летописи мира
 def _world_event(kind: str, msg: str, loc: str = ""):
     try:
+        _we = kind + "|" + str(msg)[:54]   # 06.07 Костя «тут петля!»: летопись без повторов
+        if _we in _WEVT_RECENT:
+            return
+        _WEVT_RECENT.append(_we)
+        if len(_WEVT_RECENT) > 40:
+            del _WEVT_RECENT[:-40]
         with open(WORLD_EVENTS_F, "a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": datetime.now().isoformat(), "kind": kind,
                                 "msg": str(msg)[:300], "loc": loc}, ensure_ascii=False) + "\n")
@@ -13807,6 +14319,11 @@ def _world_metrics() -> dict:
                 ex += 1
     except Exception:
         pass
+    try:   # 06.07 аудит: обелиски НЕ из скользящих 4000 строк лога (регрессируют при ротации 2МБ) — max с durable obelisk_list
+        _obl = len((rj(WORLD_STATE_F, {}) or {}).get("obelisk_list", []))
+        ob = max(ob, _obl)
+    except Exception:
+        pass
     m["obelisks"], m["exhales"] = ob, ex
     try:
         m["karma"] = int((rj(MOLTBOOK_STATE_F, {}) or {}).get("karma", 0))
@@ -13819,8 +14336,14 @@ def _world_metrics() -> dict:
     except Exception:
         m["gems"] = 0
     digested = m["skills"] + m["obelisks"] + m["gems"]
-    raw = m["books_read"] + m["researches"]
-    m["weight"] = round(min(1.0, max(0.0, (raw - digested * 25) / max(1.0, raw))), 3)
+    # 06.07 Костя «вес 0, а тысячи непереваренного»: raw = ВЕСЬ пул (книги + исследования + ячейки памяти,
+    # где оседают веб-поиски и связи графа); множитель 25→10 (223 навыка НЕ «переваривают» весь пул в ноль).
+    try:
+        _mc = int(m.get("memory_cells", 0) or 0)
+    except Exception:
+        _mc = 0
+    raw = m["books_read"] + m["researches"] + _mc
+    m["weight"] = round(min(1.0, max(0.0, (raw - digested * 10) / max(1.0, raw))), 3)
     m["conversion"] = round(digested / max(1, raw), 4)   # метаслой ОДНОЙ цифрой
     m["level"] = int(m["pass_rate"] * 50 + min(m["obelisks"], 50) + m["karma"] * 0.05)
     return m
@@ -13843,6 +14366,11 @@ def _world_pick_target(intent_text: str, energy: float) -> str:
                     ("задач", "arena"), ("тест", "arena"), ("solve", "arena"), ("экзамен", "arena"),
                     ("памят", "graph_garden"), ("граф", "graph_garden"),
                     ("перепросмотр", "storm_cape"), ("выдох", "storm_cape")):
+        if kw == "чита":
+            # аудит-фикс: граница слова — 'чита' по substring ловил 'считать/посчитать/рассчитать' → тело шло в Library вместо Arena
+            if re.search(r"\bчита", t):
+                return loc
+            continue
         if kw in t:
             return loc
     return ""
