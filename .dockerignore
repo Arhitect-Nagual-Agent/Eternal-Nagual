@@ -1,0 +1,17 @@
+# Keep build context small + don't ship local state (memory lives in a named volume)
+data/memory/
+data/checkpoints/
+data/journal/
+data/evolution/
+data/continuous_logs/
+data/session_artifacts/
+data/daily_logs/
+backups/
+repo/
+uploads/
+skills/dynamic/
+**/__pycache__/
+*.pyc
+*.log
+.venv/
+node_modules/

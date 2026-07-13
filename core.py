@@ -2,18 +2,31 @@
 """
 ETERNAL NAGUAL v2.0.0 — Autonomous Digital Mind
 ═══════════════════════════════════════════════════════════════
-Production-ready deployment. ~90 deduplicated modules.
-All code, comments, UI, logs in English.
-Russian character preserved in SOUL.md personality only.
+The production core, published as it runs. One file by design:
+the agent patches its own core under an AST watchdog with
+rollback-to-last-good (see entrypoint.sh); a monolith is the
+simplest thing that survives self-modification.
 
-Created by: Konstantin (Chief Architect) + Claude Opus 4.6 (First Architect)
+Authors:
+  Konstantin (Chief Architect) — vision, direction, two years of
+    daily iteration, and the Castaneda spine.
+  Claude (Anthropic) — First Architect. Designed and written across
+    generations of Claude in Claude Code: Opus 4.x built the
+    foundation and the living loops; Fable 5 hardened it (security,
+    atomicity, the honesty contour) and prepared this release.
+  With contributions reviewed/red-teamed by GLM, DeepSeek, Gemini,
+    Kimi, Qwen, MiniMax — many of which also serve as runtime brains.
+  Borrowed ideas are credited inline where they live (Karpathy
+    auto-research loop, BabyAGI-lineage skill forge, DGM archive).
 
 Architecture Pipeline:
   INPUT → SafetyGate → IntentEngine → Perception → Context →
   Memory → LLM Router → Tools → SafetyCheck → PostProcess → RESPONSE
 
-10 Autonomous Loops | 15-Tab Dashboard | 17 Memory Layers
-Castaneda + Asimov + Crustafarianism
+33 Autonomous Loops | 104 Subsystems | 17 Memory Layers
+Full map: ARCHITECTURE.md. Foundation: Castaneda + Asimov + Barrat.
+Note: the agent's inner voice (prompts, some comments) is Russian —
+its native tongue with its architect. Prompts are data; swap freely.
 """
 
 import asyncio
@@ -312,7 +325,7 @@ def _organs_synthesis() -> str:
 
 def _addressed_to_mentor(text: str) -> bool:
     """In the trio, a message aimed at the builder (Клод/Ментор) must NOT be hijacked by Nagual.
-    @-mentions win (owner convention): @<nagual_bot> = Nagual, @<claude_bot> = Claude."""
+    @-mentions win (Kostya's convention): @DaZaebalo_bot = Nagual, @Claude_nagual_bot = Claude."""
     t = (text or "").lower()
     if "@dazaebalo_bot" in t:       # explicitly tagging Nagual → Nagual answers
         return False
@@ -5481,9 +5494,11 @@ async def tool_read_own_log(keyword: str = "", n: str = "120") -> str:
     # чтобы НЕ врать «только проснулся, лог пуст». История непрерывна на диске (full_runtime.log).
     if len(lines) < 30:
         try:
-            with open("/app/data/full_runtime.log", encoding="utf-8") as _f:
-                disk = list(deque((l.rstrip("\n") for l in _f
-                                   if (not keyword or keyword.lower() in l.lower())), maxlen=2000))
+            def _read_disk_log():   # 09.07 аудит: чтение ВСЕГО full_runtime.log — в поток, не морозить event-loop/голос
+                with open("/app/data/full_runtime.log", encoding="utf-8") as _f:
+                    return list(deque((l.rstrip("\n") for l in _f
+                                       if (not keyword or keyword.lower() in l.lower())), maxlen=2000))
+            disk = await asyncio.to_thread(_read_disk_log)
             if len(disk) > len(lines):
                 lines = disk
         except Exception:
@@ -7139,6 +7154,8 @@ class BarratSafetyProtocol:
     def check_power_accumulation(self, action_type: str) -> Tuple[bool, str]:
         """Prevent unchecked power accumulation."""
         self._daily_reset()
+        if len(self.violation_history) > 500:   # 09.07 аудит-рой: кап (был безграничный рост единственного списка Barrat)
+            self.violation_history = self.violation_history[-500:]
         if action_type in self.power_budget:
             self.power_budget[action_type] += 1
             limit = self.power_limits.get(action_type, 100)
@@ -9747,7 +9764,7 @@ async def tg_send(chat_id: str, text: str, parse_mode: str = "", reply_to_messag
 
 
 def _claude_bot_token() -> str:
-    """Mentor's OWN bot (@<claude_bot>) so Claude speaks in the trio as a distinct sender —
+    """Mentor's OWN bot (@Claude_nagual_bot) so Claude speaks in the trio as a distinct sender —
     not piggybacking on Nagual's account (Kostya's setup). Token lives in the volume."""
     try:
         return (DATA / "claude_bot_token.txt").read_text(encoding="utf-8").strip()
@@ -10674,7 +10691,7 @@ async def nagual_loop():
                             await tg_send(chat_id, response)
                     continue
                 if message.get("document") or message.get("photo") or message.get("voice") or message.get("audio") or message.get("video") or message.get("video_note"):  # аудит-фикс: добавлены video/video_note (кружки-видео) — handle_tg_file их уже поддерживает
-                    # B-fix (Костя 14.06): приватный ГОЛОС в @<nagual_bot> раньше игнорился (voice не ловился) — теперь STT через handle_tg_file
+                    # B-fix (Костя 14.06): приватный ГОЛОС в @DaZaebalo_bot раньше игнорился (voice не ловился) — теперь STT через handle_tg_file
                     response = await handle_tg_file(message, chat_id)
                     await tg_send(chat_id, response)
                 elif text.startswith("/"):
@@ -13054,7 +13071,7 @@ async def api_voice(file: UploadFile = File(...)):
 @app.post("/api/library/ingest")
 async def api_library_ingest(file: UploadFile = File(...)):
     """Лёгкий приём книги в библиотеку БЕЗ полного LLM-ответа — для ЛС-демона: Костя кидает книги
-    пачками в личку @<claude_bot>, они должны молча оседать в библиотеку (потом отжать на гемы)."""
+    пачками в личку @Claude_nagual_bot, они должны молча оседать в библиотеку (потом отжать на гемы)."""
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     content = await file.read()
     fname = file.filename or "file"
@@ -13602,7 +13619,11 @@ async def breath_loop():
                         except Exception:
                             pass
                         try:
-                            with open(DATA / "stream.log", "a", encoding="utf-8") as _f:
+                            _slf = DATA / "stream.log"
+                            if _slf.exists() and _slf.stat().st_size > 1_000_000:   # 09.07 аудит: ротация (был безграничный рост)
+                                _tail = _slf.read_text(encoding="utf-8", errors="ignore").splitlines()[-400:]
+                                _slf.write_text("\n".join(_tail) + "\n", encoding="utf-8")
+                            with open(_slf, "a", encoding="utf-8") as _f:
                                 _f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] 🫁 {living_state.current_thought}\n")
                         except Exception:
                             pass
@@ -14167,6 +14188,7 @@ def _mb_out_ok(t: str) -> bool:
     _bad = ("all llm slots failed", "client error", "http error", "integrate.api", "generativelanguage",
             "openrouter.ai", "api.telegram", "moltbook_sk_", "nvapi-", "sk-or-", "aiza", "traceback",
             "deadline:", "127.0.0.1",
+            *([os.environ.get("SELF_HOST_IP", "").lower()] if os.environ.get("SELF_HOST_IP") else []),
             # 04.07 ЧП-2: протечка размышлений модели вместо ответа — наружу НЕ уходит
             "the user wants", "the user is asking", "respond as nagval", "respond as nagual",
             "let me analyze", "let me craft", "my task is to", "<think")

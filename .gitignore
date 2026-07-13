@@ -1,0 +1,29 @@
+# secrets — never commit
+config.env
+*.env
+!config.env.example
+data/configs/router_keys.json
+data/configs/slots.json
+*.pem
+id_*
+
+# runtime state (lives on the Docker volume, not in git)
+data/*
+!data/dna/
+data/dna/*
+!data/dna/SOUL.md
+*.log
+*.jsonl
+__pycache__/
+*.pyc
+.boot_fails
+core_lastgood.py
+
+# dashboard
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
+# os / editor
+.DS_Store
+Thumbs.db

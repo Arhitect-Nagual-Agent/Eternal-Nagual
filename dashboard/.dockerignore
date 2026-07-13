@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+*.log
+dev.log
+server.log
+e2e_*.mjs
+verify_*.mjs
+kab_*.sh

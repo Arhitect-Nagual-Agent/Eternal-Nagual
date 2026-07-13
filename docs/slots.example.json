@@ -1,0 +1,10 @@
+[
+  {"key_id": "k_nvi1", "model_id": "mistralai/mistral-small-4-119b-2603", "enabled": true, "role": "dialog,background"},
+  {"key_id": "k_nvi2", "model_id": "mistralai/mistral-small-4-119b-2603", "enabled": true, "role": "dialog,background"},
+  {"key_id": "k_nvi1", "model_id": "minimaxai/minimax-m3",                "enabled": true, "role": "dialog,background"},
+  {"key_id": "k_nvi1", "model_id": "deepseek-ai/deepseek-v4-pro",         "enabled": true, "role": "dialog,background"},
+  {"key_id": "k_nvi1", "model_id": "z-ai/glm-5.2",                        "enabled": true, "role": "dialog"},
+  {"key_id": "k_goo1", "model_id": "gemini-3.5-flash",                    "enabled": true, "role": "files,dialog"},
+  {"key_id": "k_ope1", "model_id": "google/gemma-4-26b-a4b-it:free",      "enabled": true, "role": "dialog,background"},
+  {"key_id": "k_ant1", "model_id": "claude-sonnet-5",                     "enabled": true, "role": "dialog,background"}
+]

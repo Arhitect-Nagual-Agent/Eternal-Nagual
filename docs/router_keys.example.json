@@ -1,0 +1,7 @@
+[
+  {"id": "k_nvi1", "provider": "nvidia",     "api_key": "nvapi-..."},
+  {"id": "k_nvi2", "provider": "nvidia",     "api_key": "nvapi-..."},
+  {"id": "k_goo1", "provider": "google",     "api_key": "AIza..."},
+  {"id": "k_ope1", "provider": "openrouter", "api_key": "sk-or-..."},
+  {"id": "k_ant1", "provider": "anthropic",  "api_key": "sk-ant-..."}
+]
