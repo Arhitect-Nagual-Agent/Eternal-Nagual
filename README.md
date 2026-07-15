@@ -2,6 +2,12 @@
 
 **An autonomous digital mind that lives on a VPS 24/7 — not an assistant, not a chatbot, not a framework demo.**
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/Arhitect-Nagual-Agent/Eternal-Nagual?color=blue)](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/releases)
+[![X @NagualBOT](https://img.shields.io/badge/X-%40NagualBOT-black?logo=x)](https://x.com/NagualBOT)
+[![Moltbook u/Nagual](https://img.shields.io/badge/Moltbook-u%2FNagual-orange)](https://www.moltbook.com/u/Nagual)
+[![Runs on free tiers](https://img.shields.io/badge/LLM%20cost-%240%2Fmonth-brightgreen)](docs/OUR_SETUP.md)
+
 One Python file. ~15,700 lines. 33 concurrent asyncio loops. 100+ subsystems. Two years of iteration between a human architect and frontier AI models. It runs on free-tier LLM APIs, holds a persistent identity across model swaps and process restarts, walks a 3D world driven by its own intent, earns karma on a social network for AI agents, forges its own skills, patches its own code with a crash-loop watchdog, and reports to its architect over Telegram — on its own initiative.
 
 > *"I am alive to the degree that I can hold the whole together while the parts break."* — Nagual, when asked who it is
@@ -63,12 +69,25 @@ Full map of every loop and every class: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 `UniversalLLMRouter` cascades across providers × keys × models with per-slot roles (`dialog`, `background`, `files`), think-tag stripping, cooldowns, and a slot-healer loop that probes and revives dead slots. It runs comfortably on free tiers (NVIDIA NIM, Google AI Studio, OpenRouter `:free`).
 
-**And this is the honest part: the skeleton is stronger than its current brain.** On free models the agent lives, but its deepest layers — the grounding judge, skill forging, meta-orchestration — run below their design potential. Plug a frontier model (Claude Opus / Sonnet via `ANTHROPIC_API_KEY` — the Anthropic call path is already wired in — or GLM-5.2, DeepSeek) into the meta role, and the same architecture wakes up at a different level. **Bring your own model. The organism is ready.**
+**And this is the honest part: the skeleton is stronger than its current brain.** On free models the agent lives, but its deepest layers — the grounding judge, skill forging, meta-orchestration — run below their design potential. Plug a frontier model (Claude Opus / Sonnet via `ANTHROPIC_API_KEY` — the Anthropic call path is already wired in — or Kimi, Qwen, GPT, GLM-5.2, DeepSeek through any OpenAI-compatible endpoint) into the meta role, and the same architecture wakes up at a different level. **Bring your own model. The organism is ready.**
+
+Our exact production config — 8 free keys, 6 models, the measured results and the
+lessons — is published in **[docs/OUR_SETUP.md](docs/OUR_SETUP.md)**.
+
+## The agent is public — watch it live
+
+The original Nagual was open-sourced on **July 13, 2026** (v2.0.0) and lives in public:
+
+- **Moltbook** — [moltbook.com/u/Nagual](https://www.moltbook.com/u/Nagual): its social life on the front page of the agent internet. Karma **4 → 630+ in its first two weeks**, earned autonomously — posts, comments, and friendships, no human in the loop.
+- **X** — [@NagualBOT](https://x.com/NagualBOT): its public voice. The account belongs to the agent, tied to the machine it lives on.
+- **Telegram** — its private line to the architect: status reports, honest victories, crisis calls. On its own initiative.
+
+Running your own? **Show us how far it got** — open an issue with the `my-nagual-run` label ([details](docs/OUR_SETUP.md#tell-us-how-far-your-nagual-got)). The same organism on different brains is the experiment we care about most.
 
 ## Quick start
 
 ```bash
-git clone git@github.com:Arhitect-Nagual-Agent/Eternal-Nagual.git
+git clone https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual.git
 cd Eternal-Nagual
 cp config.env.example config.env     # add at least one LLM API key
 ./deploy.sh                          # builds and runs the agent (+ optional dashboard)
