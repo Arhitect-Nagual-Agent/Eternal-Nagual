@@ -12,7 +12,7 @@ import { OrbitControls, Stars, Sparkles, Html, Line, Trail, MeshReflectorMateria
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
 import * as THREE from 'three'
 
-// ── типы (экспорт: их же использует публичная витрина /watch) ────────────────
+// ---- types ----
 export interface WorldLoc { q: number; r: number; name: string; organ: string }
 export interface WorldBody { q: number; r: number; loc: string; target: string; action: string; reason?: string; hp?: number; stamina?: number; glow?: number }
 
