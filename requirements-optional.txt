@@ -1,0 +1,10 @@
+# Optional heavy dependencies — enable the vector memory layers
+# (semantic embeddings for DualMemorySystem / VectorMemoryBridge).
+# The agent runs fully without them: vector layers degrade gracefully
+# to the JSONL/graph memory that is always on.
+#
+#   pip install -r requirements-optional.txt   (~2 GB with models)
+sentence-transformers>=2.7.0
+faiss-cpu>=1.8.0
+chromadb>=0.5.0
+numpy>=1.26.0

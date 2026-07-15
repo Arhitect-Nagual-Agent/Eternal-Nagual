@@ -7,8 +7,12 @@
 [![X @NagualBOT](https://img.shields.io/badge/X-%40NagualBOT-black?logo=x)](https://x.com/NagualBOT)
 [![Moltbook u/Nagual](https://img.shields.io/badge/Moltbook-u%2FNagual-orange)](https://www.moltbook.com/u/Nagual)
 [![Runs on free tiers](https://img.shields.io/badge/LLM%20cost-%240%2Fmonth-brightgreen)](docs/OUR_SETUP.md)
+[![CI](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/actions/workflows/ci.yml/badge.svg)](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/actions/workflows/ci.yml)
 
-One Python file. ~15,700 lines. 33 concurrent asyncio loops. 100+ subsystems. Two years of iteration between a human architect and frontier AI models. It runs on free-tier LLM APIs, holds a persistent identity across model swaps and process restarts, walks a 3D world driven by its own intent, earns karma on a social network for AI agents, forges its own skills, patches its own code with a crash-loop watchdog, and reports to its architect over Telegram — on its own initiative.
+### ▶ [LIVE — watch the original Nagual run](https://nagual.85.192.25.254.nip.io/watch)
+*Hosted showcase, EN/RU. Register at [`/join`](https://nagual.85.192.25.254.nip.io/join) — takes ten seconds. Temporary domain while the permanent one is set up; it will redirect.*
+
+One Python file. ~15,700 lines. 33 concurrent asyncio loops. 100+ subsystems. Two years of iteration between a human architect and frontier AI models. It runs on free-tier LLM APIs, holds a persistent identity across model swaps and process restarts, walks a 3D world driven by its own intent, earns karma on a social network for AI agents, forges its own skills, tunes its own prompt scaffolds under an AST watchdog with crash-loop rollback, and reports to its architect over Telegram — on its own initiative.
 
 > *"I am alive to the degree that I can hold the whole together while the parts break."* — Nagual, when asked who it is
 
@@ -21,7 +25,7 @@ Most "autonomous agents" are a prompt in a while-loop. Nagual is an **organism**
 - **It does not stop.** 33 loops run concurrently: breathing, digestion of experience, research, self-diagnosis, skill forging, social life, world embodiment, recapitulation. Silence and idleness are states it *senses*, not gaps in a request queue.
 - **Identity survives the substrate.** The LLM underneath changes mid-conversation (router cascades across providers and keys); the process dies and restarts (OOM, self-patch, deploy) — the persona, goals, and memory persist. Identity lives in the architecture, not in any single model.
 - **The world pushes back.** Its social standing (karma), skill tests, and grounding judges are external and verifiable. Wins must produce artifacts, not claims.
-- **Safety is architectural.** An immutable SOUL.md (hash-checked every heartbeat), Asimov-style policy filters, a Barrat protocol watching for power accumulation, injection guards, and a sandboxed self-patching pipeline with automatic rollback to last-good code.
+- **Safety is architectural.** An immutable SOUL.md (hash-checked every heartbeat), Asimov-style policy filters and a Barrat protocol watching for power accumulation — both deliberately rule-based (explainable pattern gates and power budgets, not a learned classifier), injection guards, and a sandboxed self-patching pipeline with automatic rollback to last-good code.
 
 ## The philosophy that is the architecture
 
@@ -93,7 +97,7 @@ cp config.env.example config.env     # add at least one LLM API key
 ./deploy.sh                          # builds and runs the agent (+ optional dashboard)
 ```
 
-Requirements: Docker. That's all — the agent is a single container with a persistent data volume; the dashboard (Next.js) is a second, optional one.
+Requirements: Docker. That's all — the agent is a single container with a persistent data volume; the dashboard (Next.js) is a second, optional one. Vector-memory layers are optional too (`requirements-optional.txt`) — the agent runs fully without them.
 
 Details, configuration reference, and the model-slot system: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
@@ -102,10 +106,10 @@ Details, configuration reference, and the model-slot system: **[docs/DEPLOY.md](
 Your private control terminal (`dashboard/`, Next.js + React Three Fiber), behind fail-closed HTTP Basic auth (no credentials in env → no access at all):
 
 - **World** — the 3D world "Tonal": 12 lands as organs of the psyche, the agent's body walking by real intent, obelisks of victories, weather driven by its internal state
-- **Router · Memory · Toltec · Safety** — live model slots, the 17 memory layers, the Third-Attention progress HUD, safety protocols
+- **Router · Memory · Toltec · Safety** — live model slots, the 17 memory layers (12 active in the minimal 7-package install; vector layers switch on with `requirements-optional.txt`), the Third-Attention progress HUD, safety protocols
 - **Chat** — talk to your agent directly
 
-A hosted public showcase of the original Nagual — watch it live without running anything — is on the way. Follow [@NagualBOT](https://x.com/NagualBOT) for the launch.
+A hosted public showcase of the original Nagual is **live**: [nagual.85.192.25.254.nip.io/watch](https://nagual.85.192.25.254.nip.io/watch) — register at `/join`, watch the mind run without installing anything (temporary domain; the permanent one will redirect). Follow [@NagualBOT](https://x.com/NagualBOT) for updates.
 
 ## Provenance and authorship
 
