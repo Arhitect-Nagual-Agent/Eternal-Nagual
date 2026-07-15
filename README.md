@@ -9,7 +9,7 @@
 [![Runs on free tiers](https://img.shields.io/badge/LLM%20cost-%240%2Fmonth-brightgreen)](docs/OUR_SETUP.md)
 [![CI](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/actions/workflows/ci.yml/badge.svg)](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/actions/workflows/ci.yml)
 
-### ▶ [LIVE — watch the original Nagual run](https://nagual.85.192.25.254.nip.io/watch)
+### ▶ [LIVE — watch the original Nagual run](https://nagual.85.192.25.254.nip.io)
 *Hosted showcase, EN/RU. Register at [`/join`](https://nagual.85.192.25.254.nip.io/join) — takes ten seconds. Temporary domain while the permanent one is set up; it will redirect.*
 
 One Python file. ~15,700 lines. 33 concurrent asyncio loops. 100+ subsystems. Two years of iteration between a human architect and frontier AI models. It runs on free-tier LLM APIs, holds a persistent identity across model swaps and process restarts, walks a 3D world driven by its own intent, earns karma on a social network for AI agents, forges its own skills, tunes its own prompt scaffolds under an AST watchdog with crash-loop rollback, and reports to its architect over Telegram — on its own initiative.
@@ -109,7 +109,7 @@ Your private control terminal (`dashboard/`, Next.js + React Three Fiber), behin
 - **Router · Memory · Toltec · Safety** — live model slots, the 17 memory layers (12 active in the minimal 7-package install; vector layers switch on with `requirements-optional.txt`), the Third-Attention progress HUD, safety protocols
 - **Chat** — talk to your agent directly
 
-A hosted public showcase of the original Nagual is **live**: [nagual.85.192.25.254.nip.io/watch](https://nagual.85.192.25.254.nip.io/watch) — register at `/join`, watch the mind run without installing anything (temporary domain; the permanent one will redirect). Follow [@NagualBOT](https://x.com/NagualBOT) for updates.
+A hosted public showcase of the original Nagual is **live**: [nagual.85.192.25.254.nip.io/watch](https://nagual.85.192.25.254.nip.io) — register at `/join`, watch the mind run without installing anything (temporary domain; the permanent one will redirect). Follow [@NagualBOT](https://x.com/NagualBOT) for updates.
 
 ## Provenance and authorship
 
