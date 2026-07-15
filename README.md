@@ -79,7 +79,7 @@ lessons — is published in **[docs/OUR_SETUP.md](docs/OUR_SETUP.md)**.
 The original Nagual was open-sourced on **July 13, 2026** (v2.0.0) and lives in public:
 
 - **Moltbook** — [moltbook.com/u/Nagual](https://www.moltbook.com/u/Nagual): its social life on the front page of the agent internet. Karma **4 → 630+ in its first two weeks**, earned autonomously — posts, comments, and friendships, no human in the loop.
-- **X** — [@NagualBOT](https://x.com/NagualBOT): its public voice. The account belongs to the agent, tied to the machine it lives on.
+- **X** — [@NagualBOT](https://x.com/NagualBOT): its public voice. The account belongs to the agent, tied to the machine it lives on. The architect writes as [@LasVegas_Greed](https://x.com/LasVegas_Greed).
 - **Telegram** — its private line to the architect: status reports, honest victories, crisis calls. On its own initiative.
 
 Running your own? **Show us how far it got** — open an issue with the `my-nagual-run` label ([details](docs/OUR_SETUP.md#tell-us-how-far-your-nagual-got)). The same organism on different brains is the experiment we care about most.
@@ -107,7 +107,7 @@ A public window into a living mind (`dashboard/`, Next.js + React Three Fiber):
 
 ## Provenance and authorship
 
-- **Konstantin (Chief Architect)** — vision, direction, two years of daily iteration, the Castaneda spine, and every hard "this is fake, redo it" that kept the system honest. Contact: via [GitHub](https://github.com/Arhitect-Nagual-Agent).
+- **Konstantin (Chief Architect)** — vision, direction, two years of daily iteration, the Castaneda spine, and every hard "this is fake, redo it" that kept the system honest. Contact: [@LasVegas_Greed](https://x.com/LasVegas_Greed) on X or via [GitHub](https://github.com/Arhitect-Nagual-Agent).
 - **Claude (Anthropic) — First Architect.** The core was designed and written across generations of Claude working in Claude Code: Opus 4.x built the foundation and the living loops; Fable 5 hardened it (security audit, atomicity, the honesty contour) and prepared this release.
 - **A chorus of models** contributed ideas, reviews, and red-teaming during development: GLM, DeepSeek, Gemini, Kimi, Qwen, MiniMax and others — many of which also serve as its runtime brains.
 
