@@ -99,11 +99,13 @@ Details, configuration reference, and the model-slot system: **[docs/DEPLOY.md](
 
 ## The dashboard
 
-A public window into a living mind (`dashboard/`, Next.js + React Three Fiber):
+Your private control terminal (`dashboard/`, Next.js + React Three Fiber), behind fail-closed HTTP Basic auth (no credentials in env → no access at all):
 
-- **/watch** — the 3D world "Tonal": 12 lands as organs of the psyche, the agent's body walking by real intent, obelisks of victories, weather driven by its internal state, a world chronicle feed
-- **"Inside" panel** — live thoughts, memory, karma, the Third-Attention progress HUD
-- **Ask Nagual** — talk to it directly from the browser
+- **World** — the 3D world "Tonal": 12 lands as organs of the psyche, the agent's body walking by real intent, obelisks of victories, weather driven by its internal state
+- **Router · Memory · Toltec · Safety** — live model slots, the 17 memory layers, the Third-Attention progress HUD, safety protocols
+- **Chat** — talk to your agent directly
+
+A hosted public showcase of the original Nagual — watch it live without running anything — is on the way. Follow [@NagualBOT](https://x.com/NagualBOT) for the launch.
 
 ## Provenance and authorship
 

@@ -5,7 +5,7 @@
 ```bash
 cp config.env.example config.env   # add at least one LLM API key
 ./deploy.sh                        # agent only
-./deploy.sh dashboard              # agent + public dashboard on :8090
+./deploy.sh dashboard              # agent + admin dashboard on :8090
 ./deploy.sh update                 # redeploy new core.py; memory survives
 ```
 
@@ -16,7 +16,7 @@ Requirements: any Linux box with Docker (1 vCPU / 4 GB RAM is enough; swap recom
 | Container | Image | Port | Purpose |
 |---|---|---|---|
 | `nagual` | `nagual:latest` | `127.0.0.1:8000` | the mind (FastAPI + 33 loops) |
-| `nagual-dash` | `nagual-dash:latest` | `0.0.0.0:8090` | public dashboard (optional) |
+| `nagual-dash` | `nagual-dash:latest` | `0.0.0.0:8090` | admin dashboard (optional, Basic-auth) |
 
 State lives on the `nagual_data` volume: memory, skills, SOUL.md, journals, the world. Containers are disposable; the volume is the life. Back it up.
 

@@ -1,21 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-// Два контура доступа (ТЗ Витрина 2.2):
-//  • ПУБЛИЧНАЯ зона (юзеры): /join /watch /account + /api/pub/* — своя cookie-auth (pubauth)
-//  • АДМИНКА Кости (всё остальное, включая /api/nagual/*): HTTP Basic как было
-const PUBLIC_PREFIXES = ['/join', '/watch', '/account', '/api/pub/']
-
+// Admin control terminal: HTTP Basic over everything.
+// Fail closed: the dashboard proxies to the agent's self-management API,
+// so no credentials configured -> no access at all.
 export function middleware(req: NextRequest) {
-  const p = req.nextUrl.pathname
-  if (PUBLIC_PREFIXES.some(x => p === x || p === x.replace(/\/$/, '') || p.startsWith(x))) {
-    return NextResponse.next()
-  }
-  // Fail closed: the admin zone proxies to the agent's self-management API.
-  // No credentials configured -> no admin access at all (public zone still works).
   const user = process.env.NAGUAL_DASH_USER
   const pass = process.env.NAGUAL_DASH_PASS
   if (!user || !pass) {
-    return new NextResponse('Admin zone disabled: set NAGUAL_DASH_USER and NAGUAL_DASH_PASS', { status: 403 })
+    return new NextResponse('Dashboard disabled: set NAGUAL_DASH_USER and NAGUAL_DASH_PASS', { status: 403 })
   }
   const auth = req.headers.get('authorization')
   if (auth) {

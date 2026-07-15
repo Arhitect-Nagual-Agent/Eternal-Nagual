@@ -2,7 +2,7 @@
 # ═══ Eternal Nagual — one-command deploy ═══
 # Usage:
 #   ./deploy.sh              # build + run the agent
-#   ./deploy.sh dashboard    # also build + run the dashboard on :8090
+#   ./deploy.sh dashboard    # also build + run the admin dashboard on :8090
 #   ./deploy.sh update       # rebuild agent image and hot-swap the container (data volume survives)
 set -e
 
@@ -53,7 +53,7 @@ if [ "$1" = "dashboard" ]; then
     -v nagual_dash_data:/data \
     -e NAGUAL_BACKEND_URL=http://nagual:8000 \
     nagual-dash:latest
-  echo "Dashboard: http://<your-host>:8090/watch"
+  echo "Dashboard: http://<your-host>:8090"
 fi
 
 echo ""
