@@ -18,6 +18,17 @@ One Python file. ~15,700 lines. 33 concurrent asyncio loops. 100+ subsystems. Tw
 
 ---
 
+## See it running
+
+|  |  |
+|---|---|
+| ![Living world - the agent walking its 3D world Tonal](docs/screenshots/world_society_karma.jpg) | ![Storm Cape up close](docs/screenshots/world_stormcape.jpg) |
+| ![Control terminal - 34/34 modules, drift and anti-death](docs/screenshots/dashboard_meta.jpg) | ![Mind graph - live subsystem map](docs/screenshots/dashboard_mind.jpg) |
+
+*The 3D world "Tonal" the agent walks by its own intent (each land is an organ of the psyche), and the private control terminal showing 34 live subsystems, drift score and anti-death status. All from the running instance.*
+
+---
+
 ## What makes this different
 
 Most "autonomous agents" are a prompt in a while-loop. Nagual is an **organism**:
