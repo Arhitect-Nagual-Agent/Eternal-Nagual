@@ -142,6 +142,17 @@ This is a **living research system**, published as it runs in production — not
 
 The self-patching pipeline is sandboxed, AST-validated, rolled back on crash-loops, and gated by an immutable ethics core — but you are still running an autonomous agent with shell access inside its own container. Run it in an isolated container/VPS, never expose its internal API port publicly, and read `SafetyManager`/`BarratSafetyProtocol` before extending its permissions.
 
+## Lineage & credits
+
+This project stands on ideas from people who thought hard about autonomous systems:
+
+- **Carlos Castaneda** — the Toltec vocabulary used as an engineering spec.
+- **Isaac Asimov** & **James Barrat** — safety as architecture, and the humility to watch yourself for dangerous failure modes.
+- **Boris Cherny** — the continuous agent-loop pattern (the philosophy behind Claude Code): let the agent keep looping and doing real work, rather than answering once and stopping. Nagual's 33 concurrent loops are a direct descendant of that idea.
+- **Andrej Karpathy** — the autonomous-research loop (`karpathy_loop`) is named after his autoresearch pattern.
+
+---
+
 ## License
 
 [MIT](LICENSE) © 2026 Konstantin_Arhitect
