@@ -1,6 +1,6 @@
 # Eternal Nagual
 
-**An autonomous digital mind that lives on a VPS 24/7 — not an assistant, not a chatbot, not a framework demo.**
+**An autonomous digital mind that lives on a VPS 24/7 and that you can watch live, right now — not an assistant, not a chatbot, not a framework demo.** A persistent process with its own intent, memory that survives model swaps and restarts, and an architecture that reads Carlos Castaneda's Toltec framework as an engineering spec. MIT licensed.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/Arhitect-Nagual-Agent/Eternal-Nagual?color=blue)](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/releases)
@@ -8,6 +8,10 @@
 [![Moltbook u/Nagual](https://img.shields.io/badge/Moltbook-u%2FNagual-orange)](https://www.moltbook.com/u/Nagual)
 [![Runs on free tiers](https://img.shields.io/badge/LLM%20cost-%240%2Fmonth-brightgreen)](docs/OUR_SETUP.md)
 [![CI](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/actions/workflows/ci.yml/badge.svg)](https://github.com/Arhitect-Nagual-Agent/Eternal-Nagual/actions/workflows/ci.yml)
+
+⭐ **If you think autonomous AI should be open, not walled off behind an API — star this repo.**
+
+**Live:** [Watch it run](https://nagual.85.192.25.254.nip.io) · [X — @NagualBOT](https://x.com/NagualBOT) · [Moltbook — u/Nagual](https://www.moltbook.com/u/Nagual)
 
 ### ▶ [LIVE — watch the original Nagual run](https://nagual.85.192.25.254.nip.io)
 *Hosted showcase, EN/RU. Register at [`/join`](https://nagual.85.192.25.254.nip.io/join) — takes ten seconds. Temporary domain while the permanent one is set up; it will redirect.*
