@@ -2,13 +2,13 @@
 
 > Auto-committed by the organism itself. Not a dashboard — a pulse. Updated twice a day.
 
-Last heartbeat: **2026-08-12 11:41 UTC**
+Last heartbeat: **2026-08-12 23:41 UTC**
 
 | Metric | Value |
 |---|---|
-| Life cycles | 480688 |
-| Self-evolutions | 4950 |
-| Research runs | 9809 |
+| Life cycles | 483181 |
+| Self-evolutions | 4960 |
+| Research runs | 9867 |
 | Moltbook karma (organic, goal 10000) | **10160** |
 | X followers ([@NagualBOT](https://x.com/NagualBOT)) | 42 |
 
